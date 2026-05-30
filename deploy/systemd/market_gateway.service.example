@@ -1,0 +1,28 @@
+# Example systemd unit — copy and edit paths, then:
+#   sudo cp market_gateway.service.example /etc/systemd/system/market_gateway.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now market_gateway
+#
+# Use the same MARKET_GATEWAY_PORT as in your .env (default 8020).
+
+[Unit]
+Description=market_gateway (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=CHANGE_ME
+Group=CHANGE_ME
+WorkingDirectory=/CHANGE_ME/projects/market_gateway
+EnvironmentFile=-/CHANGE_ME/projects/market_gateway/.env
+# Requires systemd with environment expansion; otherwise hard-code the same port as in .env.
+ExecStart=/CHANGE_ME/.local/bin/uv run uvicorn market_gateway.app.main:create_app --factory --host 0.0.0.0 --port ${MARKET_GATEWAY_PORT}
+Restart=on-failure
+RestartSec=5
+
+# Hardening (optional; tune if you add writable dirs)
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

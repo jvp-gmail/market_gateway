@@ -128,6 +128,26 @@ class LiveCache:
             return None
         return (lo, hi)
 
+    def _bar_list_has_ts_in_closed_range(
+        self,
+        bar_list: list[Any],
+        day_start: datetime,
+        day_end_excl: datetime,
+        need_lo: datetime,
+        need_hi: datetime,
+    ) -> bool:
+        for b in bar_list:
+            try:
+                bar = Bar.model_validate(b)
+            except ValueError:
+                continue
+            ts = ensure_utc(bar.timestamp)
+            if ts < day_start or ts >= day_end_excl:
+                continue
+            if need_lo <= ts <= need_hi:
+                return True
+        return False
+
     async def live_bars_window_covered(
         self,
         symbol: str,
@@ -170,14 +190,20 @@ class LiveCache:
             if env is None:
                 return False
             bar_lo, bar_hi = env
-            # Intraday: cached min/max must span the whole requested slice. Daily bars use
-            # UTC midnight per calendar day, so bar_hi is usually far before end-of-day;
-            # require interval overlap with [need_lo, need_hi] instead.
+            # Intraday: min/max must bracket the slice, and at least one bar must fall inside
+            # [need_lo, need_hi]. Otherwise sparse bars (e.g. only session open/close) can make
+            # the envelope span the window while get_live_bars returns nothing for that slice.
             if timeframe == "1d":
+                # Daily bars use UTC midnight per calendar day, so bar_hi is usually far before
+                # end-of-day; require interval overlap with [need_lo, need_hi] instead.
                 if bar_hi < need_lo or bar_lo > need_hi:
                     return False
             else:
                 if bar_lo > need_lo or bar_hi < need_hi:
+                    return False
+                if not self._bar_list_has_ts_in_closed_range(
+                    bar_list, day_start, day_end_excl, need_lo, need_hi
+                ):
                     return False
             d += timedelta(days=1)
         return True

@@ -19,10 +19,13 @@ from market_gateway.app.core.time_utils import ensure_utc, utc_now
 from market_gateway.app.services.historical_store import (
     PostgresHistoricalStore,
     _deterministic_sample_bars,
-    is_option_contract_symbol,
 )
 from market_gateway.schwab.normalize import schwab_candles_to_bars
-from market_gateway.schwab.option_symbol import schwab_option_symbol
+from market_gateway.schwab.option_symbol import (
+    gateway_option_symbol,
+    is_option_contract_symbol,
+    schwab_option_symbol,
+)
 
 if TYPE_CHECKING:
     from market_gateway.app.services.historical_store import HistoricalStore
@@ -83,9 +86,10 @@ class DataResolver:
         # Pull a wider range than the live window; Schwab date filtering can be
         # exclusive or TZ-sensitive, then we filter to [win_s, win_e].
         fetch_start = win_s - timedelta(days=14)
+        equity_sym = sym.upper()
         try:
             raw = await self._schwab.get_price_history(
-                sym.upper(),
+                equity_sym,
                 timeframe,
                 start=fetch_start,
                 end=win_e,
@@ -186,9 +190,8 @@ class DataResolver:
                 end_u.isoformat(),
             )
             return merged
-        sym_key = sym if is_option_contract_symbol(sym) else sym.upper()
         sample_tail = _deterministic_sample_bars(
-            sym_key, timeframe, live_start, end_u, source="sample"
+            sym, timeframe, live_start, end_u, source="sample"
         )
         if not sample_tail:
             return merged
@@ -322,15 +325,17 @@ class DataResolver:
         else:
             start_u = end_u - timedelta(days=7)
 
-        sym = symbol
+        raw_sym = symbol
+        is_opt = is_option_contract_symbol(raw_sym)
+        sym_key = gateway_option_symbol(raw_sym) if is_opt else raw_sym.upper()
 
         if mode == DataMode.HISTORICAL_ONLY:
-            if is_option_contract_symbol(sym):
-                bars = await self._historical.get_option_bars(sym, timeframe, start_u, end_u)
+            if is_opt:
+                bars = await self._historical.get_option_bars(sym_key, timeframe, start_u, end_u)
             else:
-                bars = await self._historical.get_equity_bars(sym.upper(), timeframe, start_u, end_u)
+                bars = await self._historical.get_equity_bars(sym_key, timeframe, start_u, end_u)
             return HistoricalDataResponse(
-                symbol=sym,
+                symbol=raw_sym,
                 timeframe=timeframe,
                 mode=mode.value,
                 start=start_u,
@@ -339,9 +344,9 @@ class DataResolver:
             )
 
         if mode == DataMode.LIVE_ONLY:
-            live = await self._live_bars_for_window(sym, timeframe, start_u, end_u)
+            live = await self._live_bars_for_window(sym_key, timeframe, start_u, end_u)
             return HistoricalDataResponse(
-                symbol=sym,
+                symbol=raw_sym,
                 timeframe=timeframe,
                 mode=mode.value,
                 start=start_u,
@@ -350,44 +355,41 @@ class DataResolver:
             )
 
         # canonical_plus_live and best_available
-        lf = await self._historical.get_last_finalized_timestamp(
-            sym if is_option_contract_symbol(sym) else sym.upper(),
-            timeframe,
-        )
+        lf = await self._historical.get_last_finalized_timestamp(sym_key, timeframe)
         hist: list[Any] = []
         if lf is None:
-            if is_option_contract_symbol(sym):
-                hist = await self._historical.get_option_bars(sym, timeframe, start_u, end_u)
+            if is_opt:
+                hist = await self._historical.get_option_bars(sym_key, timeframe, start_u, end_u)
             else:
-                hist = await self._historical.get_equity_bars(sym.upper(), timeframe, start_u, end_u)
-            live = await self._live_bars_for_window(sym, timeframe, start_u, end_u)
+                hist = await self._historical.get_equity_bars(sym_key, timeframe, start_u, end_u)
+            live = await self._live_bars_for_window(sym_key, timeframe, start_u, end_u)
             merged = merge_bars_by_preference(hist, live)
         else:
             lf_u = ensure_utc(lf)
             hist_end = min(end_u, lf_u)
             live_start = max(start_u, lf_u)
             # Daily canonical rows use one timestamp per session/day; start sample/live tail next UTC day.
-            if timeframe == "1d" and not is_option_contract_symbol(sym):
+            if timeframe == "1d" and not is_opt:
                 live_start = max(start_u, lf_u + timedelta(days=1))
             if start_u <= hist_end:
-                if is_option_contract_symbol(sym):
+                if is_opt:
                     hist = await self._historical.get_option_bars(
-                        sym, timeframe, start_u, hist_end
+                        sym_key, timeframe, start_u, hist_end
                     )
                 else:
                     hist = await self._historical.get_equity_bars(
-                        sym.upper(), timeframe, start_u, hist_end
+                        sym_key, timeframe, start_u, hist_end
                     )
             live: list[Any] = []
             if live_start <= end_u:
-                live = await self._live_bars_for_window(sym, timeframe, live_start, end_u)
+                live = await self._live_bars_for_window(sym_key, timeframe, live_start, end_u)
             merged = merge_bars_by_preference(hist, live)
             merged = self._append_sample_tail_when_live_empty(
-                merged, sym, timeframe, mode, live, live_start, end_u
+                merged, sym_key, timeframe, mode, live, live_start, end_u
             )
 
         return HistoricalDataResponse(
-            symbol=sym,
+            symbol=raw_sym,
             timeframe=timeframe,
             mode=mode.value,
             start=start_u,

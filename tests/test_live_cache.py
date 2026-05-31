@@ -114,6 +114,32 @@ async def test_live_bars_window_covered_1d_subwindow_without_bar_not_satisfied()
 
 
 @pytest.mark.asyncio
+async def test_live_bars_window_covered_intraday_requires_bar_inside_slice() -> None:
+    """Envelope spanning [need_lo, need_hi] is not enough if no bar timestamp lies in it."""
+    fake = FakeRedis(decode_responses=True)
+    live = LiveCache(fake)
+    d = date(2026, 10, 1)
+    bars = [
+        Bar(
+            symbol="S",
+            timestamp=datetime(2026, 10, 1, h, 0, tzinfo=UTC),
+            timeframe="1m",
+            open=1,
+            high=1,
+            low=1,
+            close=1,
+            volume=1,
+            source="live_schwab",
+        )
+        for h in (10, 16)
+    ]
+    await live.set_live_bars_day("S", "1m", d, bars, ttl_seconds=3600)
+    win_s = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+    win_e = datetime(2026, 10, 1, 14, 0, tzinfo=UTC)
+    assert not await live.live_bars_window_covered("S", "1m", win_s, win_e)
+
+
+@pytest.mark.asyncio
 async def test_merge_live_bars_day_unions_intraday_without_dropping_cached_tail() -> None:
     """Narrow Schwab slice must not replace a wider per-day blob; merge by timestamp."""
     fake = FakeRedis(decode_responses=True)

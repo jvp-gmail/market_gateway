@@ -72,6 +72,37 @@ class _MockHistorical(HistoricalStore):
         return self._lf
 
 
+class _RecordingOptionHistorical(_MockHistorical):
+    """Tracks option_symbol passed to Postgres-facing option bar queries."""
+
+    def __init__(self) -> None:
+        super().__init__(None, [])
+        self.option_keys: list[str] = []
+
+    async def get_option_bars(
+        self, option_symbol: str, timeframe: str, start: datetime, end: datetime
+    ) -> list[Bar]:
+        self.option_keys.append(option_symbol)
+        _ = timeframe, start, end
+        return []
+
+
+@pytest.mark.asyncio
+async def test_historical_only_osi_symbol_maps_to_gateway_option_key() -> None:
+    """Quotes return OSI; /history must query options using underscore DB keys."""
+    mh = _RecordingOptionHistorical()
+    fake = FakeRedis(decode_responses=True)
+    live = LiveCache(fake)
+    settings = Settings(market_gateway_api_key="k", redis_url="redis://localhost:6379/0")
+    r = DataResolver(settings, mh, live, StubSchwabClient())
+    osi = "SPY   260601C00756000"
+    start = datetime(2026, 5, 10, 14, 0, tzinfo=UTC)
+    end = datetime(2026, 5, 10, 15, 0, tzinfo=UTC)
+    out = await r.get_bars(osi, "1m", start=start, end=end, mode=DataMode.HISTORICAL_ONLY)
+    assert out.symbol == osi
+    assert mh.option_keys == ["SPY_20260601C00756000"]
+
+
 @pytest.mark.asyncio
 async def test_historical_only_uses_historical_store_only() -> None:
     lf = datetime(2026, 5, 10, 20, 0, tzinfo=UTC)

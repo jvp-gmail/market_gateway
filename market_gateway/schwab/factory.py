@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
@@ -42,9 +41,9 @@ async def create_schwab_market_client(settings: Settings) -> StubSchwabClient | 
             asyncio=True,
             enforce_enums=True,
         )
-    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+    except Exception as e:
         log.warning(
-            "Schwab token file at %s is unreadable or invalid (%s: %s); using stub client",
+            "Schwab token file at %s failed to create client (%s: %s); using stub client",
             path,
             type(e).__name__,
             e,

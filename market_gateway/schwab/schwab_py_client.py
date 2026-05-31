@@ -13,6 +13,7 @@ import httpx
 
 from market_gateway.app.config import Settings
 from market_gateway.app.core.time_utils import ensure_utc
+from market_gateway.schwab.client import PHASE3_STUB_POSITIONS
 from market_gateway.schwab.errors import SchwabHttpError
 from market_gateway.schwab.normalize import (
     flatten_option_chain,
@@ -325,8 +326,8 @@ class SchwabPyMarketClient:
         }
 
     async def get_positions(self) -> dict[str, Any]:
-        """Phase 3 keeps positions read path unimplemented; return empty (no account wiring)."""
-        return {"positions": []}
+        """Phase 3: positions remain paper/stub (no live account read); match StubSchwabClient."""
+        return PHASE3_STUB_POSITIONS
 
     async def preview_order(self, order: dict[str, Any]) -> dict[str, Any]:
         """Paper/stub semantics until Phase 5+ broker preview."""

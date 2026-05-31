@@ -5,6 +5,13 @@ from typing import Any
 
 from market_gateway.app.core.time_utils import utc_now
 
+# Phase 3: positions read path stays paper/stub (same payload for StubSchwabClient and SchwabPyMarketClient).
+PHASE3_STUB_POSITIONS: dict[str, Any] = {
+    "positions": [
+        {"symbol": "SPY", "quantity": 100, "averagePrice": 500.0},
+    ]
+}
+
 
 class StubSchwabClient:
     """Phase 1: deterministic sample payloads; no network or credentials."""
@@ -115,11 +122,7 @@ class StubSchwabClient:
         }
 
     async def get_positions(self) -> dict[str, Any]:
-        return {
-            "positions": [
-                {"symbol": "SPY", "quantity": 100, "averagePrice": 500.0},
-            ]
-        }
+        return PHASE3_STUB_POSITIONS
 
     async def preview_order(self, order: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, "estimatedNotional": order.get("quantity", 1) * 150.0}

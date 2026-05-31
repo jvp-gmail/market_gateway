@@ -45,4 +45,12 @@ async def events_stream(
         except asyncio.CancelledError:
             raise
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

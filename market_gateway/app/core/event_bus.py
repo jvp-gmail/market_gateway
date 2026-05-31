@@ -1,10 +1,14 @@
+"""Redis Streams-backed fan-out for SSE (`/events/stream`)."""
+
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
-from market_gateway.app.core.models import GatewayEvent
+from market_gateway.app.core.models import GatewayEvent, StreamEventType
 from market_gateway.app.core.time_utils import utc_now
 
 if TYPE_CHECKING:
@@ -24,6 +28,30 @@ class EventBus:
         self._redis = redis
         self._stream = stream_name
         self._xread_block_ms = xread_block_ms
+
+    async def ensure_stream_exists(self) -> None:
+        """Create the stream key if missing; log if the key exists but is not a Redis stream."""
+        key = self._stream
+        t = await self._redis.type(key)
+        if t == "stream":
+            return
+        if t == "none":
+            await self.publish(
+                GatewayEvent(
+                    event_type=StreamEventType.HEARTBEAT,
+                    event_ts=None,
+                    received_ts=utc_now(),
+                    source="market_gateway",
+                    payload={"note": "stream_initialized"},
+                )
+            )
+            return
+        log.error(
+            "EVENT_STREAM_NAME key %r has Redis type %r (expected stream). "
+            "XREAD will fail until you rename EVENT_STREAM_NAME or delete that key.",
+            key,
+            t,
+        )
 
     async def publish(self, event: GatewayEvent) -> str:
         payload = event.model_dump(mode="json")
@@ -53,12 +81,36 @@ class EventBus:
     async def stream_from(self, last_id: str = "$") -> AsyncIterator[GatewayEvent]:
         current = last_id
         while True:
-            resp = await self._redis.xread(
-                {self._stream: current}, count=10, block=self._xread_block_ms
-            )
+            try:
+                resp = await self._redis.xread(
+                    {self._stream: current}, count=10, block=self._xread_block_ms
+                )
+            except Exception as e:
+                log.error(
+                    "event bus xread failed for stream %r (cursor=%r): %s: %s",
+                    self._stream,
+                    current,
+                    type(e).__name__,
+                    e,
+                    exc_info=log.isEnabledFor(logging.DEBUG),
+                )
+                yield GatewayEvent(
+                    event_type=StreamEventType.STREAM_ERROR,
+                    event_ts=None,
+                    received_ts=utc_now(),
+                    source="market_gateway",
+                    payload={
+                        "stage": "xread",
+                        "error": type(e).__name__,
+                        "detail": str(e),
+                        "stream": self._stream,
+                    },
+                )
+                await asyncio.sleep(1.0)
+                continue
             if not resp:
                 yield GatewayEvent(
-                    event_type="heartbeat",
+                    event_type=StreamEventType.HEARTBEAT,
                     event_ts=None,
                     received_ts=utc_now(),
                     source="market_gateway",

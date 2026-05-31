@@ -127,6 +127,31 @@ You may expose only the FastAPI port on the tailnet. **Do not rely on Tailscale 
 - Do not commit `.env`, Schwab tokens, or credentials.
 - Real broker order submission is **not** implemented; order routes are paper/stub through Phase 5+.
 
+## Phase 4 (streaming): part 1
+
+Canonical stream event types (`StreamEventType` in `app/core/models.py`), publishers in `app/services/quote_stream_publisher.py`, and an optional **stub loop** for SSE testing without a Schwab WebSocket.
+
+In `.env`, set:
+
+```bash
+ENABLE_QUOTE_STREAM_STUB=true
+QUOTE_STREAM_STUB_SYMBOLS=/MES,/ES
+QUOTE_STREAM_STUB_INTERVAL_SECONDS=5
+```
+
+Then stream events (symbols are synthetic quotes only—use whatever tickers you want to see in the payload):
+
+```bash
+curl -N -H "X-API-Key: $MARKET_GATEWAY_API_KEY" \
+  "http://localhost:${MARKET_GATEWAY_PORT:-8020}/events/stream"
+```
+
+Look for `event_type` `equity_quote` and `payload.quote`. Later parts: Schwab stream ingest, Redis live cache updates, optional `option_quote` from the socket.
+
+If `curl` exits with **(18) transfer closed with outstanding read data**, the SSE generator likely hit a Redis error (common: **`EVENT_STREAM_NAME` points at a key that is not a stream** — e.g. a string key from another app). Pick a dedicated name (default `stream:events`) or `DEL` the conflicting key, then restart the gateway. With the current code you should instead receive a **`stream_error`** SSE event describing the failure.
+
+If you see repeating **`stream_error`** / **`TimeoutError`** / “Timeout reading from localhost:6379” every ~5–6s while idle on **`/events/stream`**, that is usually **redis-py’s default 5s `socket_timeout`** racing with **`XREAD BLOCK`** (`EVENT_BUS_XREAD_BLOCK_MS`, default 5000 ms). The gateway now applies **`socket_timeout=None`** to the Redis pool by default (leave **`REDIS_SOCKET_TIMEOUT_SECONDS`** unset), **after** parsing `REDIS_URL`, so it overrides **`?socket_timeout=`** in the URL too. If you set a read timeout, make it **larger than the block window** (e.g. 65 when block is 5000 ms).
+
 ## Phase roadmap
 
 | Phase | Scope |

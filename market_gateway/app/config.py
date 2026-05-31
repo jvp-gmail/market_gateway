@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     # HTTP listen port (documented for operators; uvicorn reads the port from the process argv / scripts).
     market_gateway_port: int = 8020
     redis_url: str = "redis://localhost:6379/0"
+    # None = no read timeout (required for SSE: XREAD BLOCK can idle `event_bus_xread_block_ms`).
+    redis_socket_timeout_seconds: float | None = None
+    redis_socket_connect_timeout_seconds: float = 5.0
     # Full URL wins when set (e.g. postgresql+asyncpg://user:pass@host:5432/dbname).
     database_url: str | None = None
     # Same knobs as Backtester4 DatabaseManager (used when database_url is empty).
@@ -42,6 +45,10 @@ class Settings(BaseSettings):
     history_ttl_seconds: int = 3600
     event_stream_name: str = "stream:events"
     event_bus_xread_block_ms: int = 5000
+    # Phase 4 (part 1): optional loop that publishes synthetic equity_quote events for SSE testing.
+    enable_quote_stream_stub: bool = False
+    quote_stream_stub_symbols: str = "/MES"
+    quote_stream_stub_interval_seconds: float = 5.0
 
     def resolved_asyncpg_dsn(self) -> str | None:
         """DSN for asyncpg, or None to use the sample historical store."""

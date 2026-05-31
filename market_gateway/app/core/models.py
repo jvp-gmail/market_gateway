@@ -95,6 +95,15 @@ class HistoricalDataResponse(BaseModel):
     bars: list[Bar]
 
 
+class StreamEventType(StrEnum):
+    """Canonical `GatewayEvent.event_type` values for SSE / Redis stream consumers."""
+
+    HEARTBEAT = "heartbeat"
+    EQUITY_QUOTE = "equity_quote"
+    OPTION_QUOTE = "option_quote"
+    STREAM_ERROR = "stream_error"
+
+
 class GatewayEvent(BaseModel):
     event_type: str
     event_ts: datetime | None = None

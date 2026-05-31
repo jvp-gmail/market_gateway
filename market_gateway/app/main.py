@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
@@ -25,7 +26,19 @@ def create_app(*, redis_client: Redis | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         settings = Settings()
-        rc = redis_client or redis.from_url(settings.redis_url, decode_responses=True)
+        if redis_client is None:
+            # URL query options win over kwargs in redis-py's from_url(); patch pool so
+            # socket_timeout can be None (required for XREAD BLOCK used by SSE).
+            rc = redis.from_url(settings.redis_url, decode_responses=True)
+            pool = rc.connection_pool
+            pool.connection_kwargs["socket_timeout"] = (
+                settings.redis_socket_timeout_seconds
+            )
+            pool.connection_kwargs["socket_connect_timeout"] = (
+                settings.redis_socket_connect_timeout_seconds
+            )
+        else:
+            rc = redis_client
         try:
             await rc.ping()
         except Exception as e:
@@ -40,6 +53,7 @@ def create_app(*, redis_client: Redis | None = None) -> FastAPI:
             settings.event_stream_name,
             xread_block_ms=settings.event_bus_xread_block_ms,
         )
+        await bus.ensure_stream_exists()
 
         app.state.settings = settings
         app.state.redis = rc
@@ -48,7 +62,20 @@ def create_app(*, redis_client: Redis | None = None) -> FastAPI:
         app.state.resolver = resolver
         app.state.event_bus = bus
 
+        stub_task: asyncio.Task | None = None
+        if settings.enable_quote_stream_stub:
+            from market_gateway.app.services.quote_stream_stub import run_quote_stream_stub
+
+            stub_task = asyncio.create_task(run_quote_stream_stub(bus, settings))
+
         yield
+
+        if stub_task is not None:
+            stub_task.cancel()
+            try:
+                await stub_task
+            except asyncio.CancelledError:
+                pass
 
         closer_schwab = getattr(schwab, "aclose", None)
         if closer_schwab is not None:

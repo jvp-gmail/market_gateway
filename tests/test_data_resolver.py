@@ -103,6 +103,46 @@ async def test_historical_only_osi_symbol_maps_to_gateway_option_key() -> None:
     assert mh.option_keys == ["SPY_20260601C00756000"]
 
 
+class _MockHistoricalOptionBarsWithGatewaySymbol(_MockHistorical):
+    """Returns option bars tagged with the DB/gateway key (underscore form)."""
+
+    async def get_option_bars(
+        self, option_symbol: str, timeframe: str, start: datetime, end: datetime
+    ) -> list[Bar]:
+        _ = start, end
+        ts = datetime(2026, 5, 10, 14, 30, tzinfo=UTC)
+        return [
+            Bar(
+                symbol=option_symbol,
+                timestamp=ts,
+                timeframe=timeframe,
+                open=1.0,
+                high=1.1,
+                low=0.9,
+                close=1.05,
+                volume=100,
+                source="historical",
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_historical_only_osi_request_bar_symbols_match_client_id() -> None:
+    """Bar.symbol should match the option id the client sent, not the internal gateway key."""
+    mh = _MockHistoricalOptionBarsWithGatewaySymbol(None, [])
+    fake = FakeRedis(decode_responses=True)
+    live = LiveCache(fake)
+    settings = Settings(market_gateway_api_key="k", redis_url="redis://localhost:6379/0")
+    r = DataResolver(settings, mh, live, StubSchwabClient())
+    osi = "SPY   260601C00756000"
+    start = datetime(2026, 5, 10, 14, 0, tzinfo=UTC)
+    end = datetime(2026, 5, 10, 15, 0, tzinfo=UTC)
+    out = await r.get_bars(osi, "1m", start=start, end=end, mode=DataMode.HISTORICAL_ONLY)
+    assert out.symbol == osi
+    assert len(out.bars) == 1
+    assert out.bars[0].symbol == osi
+
+
 @pytest.mark.asyncio
 async def test_historical_only_uses_historical_store_only() -> None:
     lf = datetime(2026, 5, 10, 20, 0, tzinfo=UTC)

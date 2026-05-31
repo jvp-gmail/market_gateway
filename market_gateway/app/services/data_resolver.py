@@ -46,6 +46,13 @@ def merge_bars_by_preference(historical: list[Any], live: list[Any]) -> list[Any
     return sorted(by_ts.values(), key=lambda x: ensure_utc(x.timestamp))
 
 
+def _option_bars_as_client_symbol(raw_sym: str, sym_key: str, bars: list[Any]) -> list[Any]:
+    """Align each bar's ``symbol`` with the option id the client sent (e.g. OSI vs gateway underscore)."""
+    if not bars or raw_sym == sym_key:
+        return bars
+    return [b.model_copy(update={"symbol": raw_sym}) for b in bars]
+
+
 class DataResolver:
     def __init__(
         self,
@@ -353,6 +360,7 @@ class DataResolver:
         if mode == DataMode.HISTORICAL_ONLY:
             if is_opt:
                 bars = await self._historical.get_option_bars(sym_key, timeframe, start_u, end_u)
+                bars = _option_bars_as_client_symbol(raw_sym, sym_key, bars)
             else:
                 bars = await self._historical.get_equity_bars(sym_key, timeframe, start_u, end_u)
             return HistoricalDataResponse(
@@ -366,6 +374,8 @@ class DataResolver:
 
         if mode == DataMode.LIVE_ONLY:
             live = await self._live_bars_for_window(sym_key, timeframe, start_u, end_u)
+            if is_opt:
+                live = _option_bars_as_client_symbol(raw_sym, sym_key, live)
             return HistoricalDataResponse(
                 symbol=raw_sym,
                 timeframe=timeframe,
@@ -408,6 +418,9 @@ class DataResolver:
             merged = self._append_sample_tail_when_live_empty(
                 merged, sym_key, timeframe, mode, live, live_start, end_u
             )
+
+        if is_opt:
+            merged = _option_bars_as_client_symbol(raw_sym, sym_key, merged)
 
         return HistoricalDataResponse(
             symbol=raw_sym,

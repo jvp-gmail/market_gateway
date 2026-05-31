@@ -196,8 +196,13 @@ class LiveCache:
             # the envelope span the window while get_live_bars returns nothing for that slice.
             if timeframe == "1d":
                 # Daily bars use UTC midnight per calendar day, so bar_hi is usually far before
-                # end-of-day; require interval overlap with [need_lo, need_hi] instead.
+                # end-of-day; require interval overlap with [need_lo, need_hi], then at least one
+                # bar timestamp in that slice (envelope alone can span the slice without a bar in it).
                 if bar_hi < need_lo or bar_lo > need_hi:
+                    return False
+                if not self._bar_list_has_ts_in_closed_range(
+                    bar_list, day_start, day_end_excl, need_lo, need_hi
+                ):
                     return False
             else:
                 if bar_lo > need_lo or bar_hi < need_hi:

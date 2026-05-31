@@ -87,17 +87,16 @@ class DataResolver:
             return []
         if timeframe not in ("1m", "1d"):
             return []
-        # True when Redis already had bars in-window but coverage was incomplete; used to
-        # negative-cache failed backfills so we do not call get_price_history every /history.
-        partial_uncovered = bool(live)
+        # Negative-cache failed backfills (empty Redis, Schwab empty/error, or still uncovered)
+        # so we do not call get_price_history on every /history while the window stays unfilled.
+        if await self._live.live_backfill_miss_active(sym, timeframe, win_s, win_e):
+            return live
         # Pull a wider range than the live window; Schwab date filtering can be
         # exclusive or TZ-sensitive, then we filter to [win_s, win_e].
         fetch_start = win_s - timedelta(days=14)
         equity_sym = sym.upper()
 
         async def _sync_backfill_miss_after_attempt() -> None:
-            if not partial_uncovered:
-                return
             if await self._live.live_bars_window_covered(sym, timeframe, win_s, win_e):
                 await self._live.clear_live_backfill_miss(sym, timeframe, win_s, win_e)
             else:

@@ -126,7 +126,7 @@ class DataResolver:
                 by_day[ensure_utc(b.timestamp).date()].append(b)
         ttl = self._settings.history_ttl_seconds
         for day0, day_bars in by_day.items():
-            await self._live.set_live_bars_day(sym, timeframe, day0, day_bars, ttl)
+            await self._live.merge_live_bars_day(sym, timeframe, day0, day_bars, ttl)
             await self._live.merge_live_bars_window_coverage(
                 sym, timeframe, day0, win_s, win_e, ttl
             )

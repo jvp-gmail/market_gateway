@@ -138,7 +138,7 @@ class LiveCache:
         """True if each touched UTC day's cached bars span that day's slice of [win_s, win_e].
 
         Uses min/max bar timestamps in the per-day Redis blob. ``history_live_cov`` is not
-        consulted: it can remain wider than the blob after ``set_live_bars_day`` replaces bars.
+        consulted: it can remain wider than the blob after partial writes.
         """
         start_u = ensure_utc(win_s)
         end_u = ensure_utc(win_e)
@@ -219,6 +219,39 @@ class LiveCache:
     ) -> None:
         key = history_live_key(symbol, timeframe, day.isoformat())
         payload = json.dumps([b.model_dump(mode="json") for b in bars], default=str)
+        await self._redis.set(key, payload, ex=ttl_seconds)
+
+    async def merge_live_bars_day(
+        self, symbol: str, timeframe: str, day: date, bars: list[Bar], ttl_seconds: int
+    ) -> None:
+        """Union per-day Redis bars with ``bars``; incoming wins on duplicate UTC timestamps.
+
+        Schwab history is requested with ``end`` at the current window; without merging, a
+        narrower ``win_e`` would replace the blob with only candles through that instant and
+        drop later intraday bars already cached from a wider fetch.
+        """
+        key = history_live_key(symbol, timeframe, day.isoformat())
+        day_start = self._utc_day_start(day)
+        day_end_excl = day_start + timedelta(days=1)
+        existing: list[Bar] = []
+        raw = await self._redis.get(key)
+        if raw:
+            try:
+                existing = [Bar.model_validate(x) for x in json.loads(raw)]
+            except (json.JSONDecodeError, ValueError):
+                existing = []
+        existing = [
+            b
+            for b in existing
+            if day_start <= ensure_utc(b.timestamp) < day_end_excl
+        ]
+        by_ts: dict[datetime, Bar] = {ensure_utc(b.timestamp): b for b in existing}
+        for b in bars:
+            ts = ensure_utc(b.timestamp)
+            if day_start <= ts < day_end_excl:
+                by_ts[ts] = b
+        merged = sorted(by_ts.values(), key=lambda b: ensure_utc(b.timestamp))
+        payload = json.dumps([b.model_dump(mode="json") for b in merged], default=str)
         await self._redis.set(key, payload, ex=ttl_seconds)
 
     async def set_live_bar(self, bar: Bar, ttl_seconds: int = 86400) -> None:

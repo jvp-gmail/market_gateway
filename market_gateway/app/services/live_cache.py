@@ -106,6 +106,28 @@ class LiveCache:
     def _utc_day_start(self, d: date) -> datetime:
         return datetime.combine(d, time.min, tzinfo=UTC)
 
+    def _utc_day_bar_ts_envelope(
+        self, bar_list: list[Any], day_start: datetime, day_end_excl: datetime
+    ) -> tuple[datetime, datetime] | None:
+        """Min/max bar timestamps within [day_start, day_end_excl). None if no usable bars."""
+        lo: datetime | None = None
+        hi: datetime | None = None
+        for b in bar_list:
+            try:
+                bar = Bar.model_validate(b)
+            except ValueError:
+                return None
+            ts = ensure_utc(bar.timestamp)
+            if ts < day_start or ts >= day_end_excl:
+                continue
+            if lo is None or ts < lo:
+                lo = ts
+            if hi is None or ts > hi:
+                hi = ts
+        if lo is None or hi is None:
+            return None
+        return (lo, hi)
+
     async def live_bars_window_covered(
         self,
         symbol: str,
@@ -113,7 +135,11 @@ class LiveCache:
         win_s: datetime,
         win_e: datetime,
     ) -> bool:
-        """True if per-day Redis coverage metadata shows [win_s, win_e] is satisfied for each touched UTC day."""
+        """True if each touched UTC day's cached bars span that day's slice of [win_s, win_e].
+
+        Uses min/max bar timestamps in the per-day Redis blob. ``history_live_cov`` is not
+        consulted: it can remain wider than the blob after ``set_live_bars_day`` replaces bars.
+        """
         start_u = ensure_utc(win_s)
         end_u = ensure_utc(win_e)
         d = start_u.date()
@@ -131,9 +157,7 @@ class LiveCache:
                 continue
             day_iso = d.isoformat()
             bars_key = history_live_key(symbol, timeframe, day_iso)
-            cov_key = history_live_cov_key(symbol, timeframe, day_iso)
             raw_bars = await self._redis.get(bars_key)
-            raw_cov = await self._redis.get(cov_key)
             if raw_bars is None:
                 return False
             try:
@@ -142,15 +166,11 @@ class LiveCache:
                 return False
             if not isinstance(bar_list, list) or len(bar_list) == 0:
                 return False
-            if not raw_cov:
+            env = self._utc_day_bar_ts_envelope(bar_list, day_start, day_end_excl)
+            if env is None:
                 return False
-            try:
-                cov = json.loads(raw_cov)
-                lo = ensure_utc(datetime.fromisoformat(str(cov["lo"]).replace("Z", "+00:00")))
-                hi = ensure_utc(datetime.fromisoformat(str(cov["hi"]).replace("Z", "+00:00")))
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-                return False
-            if lo > need_lo or hi < need_hi:
+            bar_lo, bar_hi = env
+            if bar_lo > need_lo or bar_hi < need_hi:
                 return False
             d += timedelta(days=1)
         return True

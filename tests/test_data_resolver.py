@@ -307,7 +307,8 @@ async def test_partial_live_day_without_coverage_triggers_schwab_refetch() -> No
     )
     r = DataResolver(settings, mh, live, schwab)
     start = datetime(2026, 5, 10, 10, 0, tzinfo=UTC)
-    end = datetime(2026, 5, 10, 15, 0, tzinfo=UTC)
+    # Align end with the mock's last candle (14:00) so coverage matches candle open times.
+    end = datetime(2026, 5, 10, 14, 0, tzinfo=UTC)
     out = await r.get_bars("SPY", "1m", start=start, end=end, mode=DataMode.LIVE_ONLY)
     assert schwab.calls == 1
     assert len(out.bars) == 3

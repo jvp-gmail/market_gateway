@@ -811,7 +811,7 @@ quote:{symbol}
 option_quote:{option_symbol}
 option_chain:{symbol}:{params_hash}
 history_live:{symbol}:{timeframe}:{date}
-history_live_cov:{symbol}:{timeframe}:{date}   # merged UTC request window satisfied by that day's blob
+history_live_cov:{symbol}:{timeframe}:{date}   # merged UTC request window (metadata); live window satisfaction uses bar timestamps in history_live
 positions
 orders:open
 strategy:{name}:state

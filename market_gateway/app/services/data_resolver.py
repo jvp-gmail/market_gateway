@@ -70,7 +70,10 @@ class DataResolver:
         win_e = ensure_utc(win_end)
         live = await self._live.get_live_bars(sym, timeframe, win_s, win_e)
         if live:
-            return live
+            if await self._live.live_bars_window_covered(sym, timeframe, win_s, win_e):
+                return live
+            if not self._settings.enable_schwab_live_data:
+                return live
         if not self._settings.enable_schwab_live_data:
             return []
         if is_option_contract_symbol(sym):
@@ -104,8 +107,8 @@ class DataResolver:
                 fetch_start.isoformat(),
             )
             return []
-        bars = schwab_candles_to_bars(sym, timeframe, candles)
-        bars = [b for b in bars if win_s <= ensure_utc(b.timestamp) <= win_e]
+        all_bars = schwab_candles_to_bars(sym, timeframe, candles)
+        bars = [b for b in all_bars if win_s <= ensure_utc(b.timestamp) <= win_e]
         if not bars:
             log.warning(
                 "Schwab %s %s: %d raw candles produced 0 bars in [%s, %s] after filter",
@@ -116,12 +119,16 @@ class DataResolver:
                 win_e.isoformat(),
             )
             return []
+        days_touching_window = {ensure_utc(b.timestamp).date() for b in bars}
         by_day: dict[date, list[Any]] = defaultdict(list)
-        for b in bars:
-            by_day[ensure_utc(b.timestamp).date()].append(b)
+        for b in all_bars:
+            if ensure_utc(b.timestamp).date() in days_touching_window:
+                by_day[ensure_utc(b.timestamp).date()].append(b)
+        ttl = self._settings.history_ttl_seconds
         for day0, day_bars in by_day.items():
-            await self._live.set_live_bars_day(
-                sym, timeframe, day0, day_bars, self._settings.history_ttl_seconds
+            await self._live.set_live_bars_day(sym, timeframe, day0, day_bars, ttl)
+            await self._live.merge_live_bars_window_coverage(
+                sym, timeframe, day0, win_s, win_e, ttl
             )
         out = await self._live.get_live_bars(sym, timeframe, win_s, win_e)
         if not out:

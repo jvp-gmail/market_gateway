@@ -38,6 +38,11 @@ def history_live_key(symbol: str, timeframe: str, day: str) -> str:
     return f"history_live:{symbol.upper()}:{timeframe}:{day}"
 
 
+def history_live_cov_key(symbol: str, timeframe: str, day: str) -> str:
+    """Tracks the UTC [lo, hi] request window merged into history_live for that day."""
+    return f"history_live_cov:{symbol.upper()}:{timeframe}:{day}"
+
+
 def positions_key() -> str:
     return "positions"
 

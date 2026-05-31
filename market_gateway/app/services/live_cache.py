@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 
 from market_gateway.app.core.cache_keys import (
+    history_live_cov_key,
     history_live_key,
     option_chain_key,
     option_quote_key,
@@ -101,6 +102,90 @@ class LiveCache:
             day += timedelta(days=1)
         bars.sort(key=lambda b: b.timestamp)
         return bars
+
+    def _utc_day_start(self, d: date) -> datetime:
+        return datetime.combine(d, time.min, tzinfo=UTC)
+
+    async def live_bars_window_covered(
+        self,
+        symbol: str,
+        timeframe: str,
+        win_s: datetime,
+        win_e: datetime,
+    ) -> bool:
+        """True if per-day Redis coverage metadata shows [win_s, win_e] is satisfied for each touched UTC day."""
+        start_u = ensure_utc(win_s)
+        end_u = ensure_utc(win_e)
+        d = start_u.date()
+        end_day = end_u.date()
+        while d <= end_day:
+            day_start = self._utc_day_start(d)
+            day_end_excl = day_start + timedelta(days=1)
+            if end_u < day_start or start_u >= day_end_excl:
+                d += timedelta(days=1)
+                continue
+            need_lo = max(start_u, day_start)
+            need_hi = min(end_u, day_end_excl - timedelta(microseconds=1))
+            if need_lo > need_hi:
+                d += timedelta(days=1)
+                continue
+            day_iso = d.isoformat()
+            bars_key = history_live_key(symbol, timeframe, day_iso)
+            cov_key = history_live_cov_key(symbol, timeframe, day_iso)
+            raw_bars = await self._redis.get(bars_key)
+            raw_cov = await self._redis.get(cov_key)
+            if raw_bars is None:
+                return False
+            try:
+                bar_list = json.loads(raw_bars)
+            except (json.JSONDecodeError, TypeError):
+                return False
+            if not isinstance(bar_list, list) or len(bar_list) == 0:
+                return False
+            if not raw_cov:
+                return False
+            try:
+                cov = json.loads(raw_cov)
+                lo = ensure_utc(datetime.fromisoformat(str(cov["lo"]).replace("Z", "+00:00")))
+                hi = ensure_utc(datetime.fromisoformat(str(cov["hi"]).replace("Z", "+00:00")))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                return False
+            if lo > need_lo or hi < need_hi:
+                return False
+            d += timedelta(days=1)
+        return True
+
+    async def merge_live_bars_window_coverage(
+        self,
+        symbol: str,
+        timeframe: str,
+        day: date,
+        win_s: datetime,
+        win_e: datetime,
+        ttl_seconds: int,
+    ) -> None:
+        """Expand stored coverage union for this day to include [win_s, win_e]."""
+        key = history_live_cov_key(symbol, timeframe, day.isoformat())
+        ws = ensure_utc(win_s)
+        we = ensure_utc(win_e)
+        raw = await self._redis.get(key)
+        if raw:
+            try:
+                prev = json.loads(raw)
+                lo = ensure_utc(
+                    datetime.fromisoformat(str(prev["lo"]).replace("Z", "+00:00"))
+                )
+                hi = ensure_utc(
+                    datetime.fromisoformat(str(prev["hi"]).replace("Z", "+00:00"))
+                )
+                lo = min(lo, ws)
+                hi = max(hi, we)
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                lo, hi = ws, we
+        else:
+            lo, hi = ws, we
+        payload = json.dumps({"lo": lo.isoformat(), "hi": hi.isoformat()})
+        await self._redis.set(key, payload, ex=ttl_seconds)
 
     async def set_live_bars_day(
         self, symbol: str, timeframe: str, day: date, bars: list[Bar], ttl_seconds: int

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -241,3 +242,77 @@ async def test_duplicate_ts_prefers_historical_in_merge() -> None:
     at = [b for b in out.bars if b.timestamp == lf]
     assert len(at) == 1
     assert at[0].close == 10
+
+
+class _CountingSchwab:
+    """Returns three 1m candles on one UTC day; counts get_price_history calls."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @property
+    def quote_source_label(self) -> str:
+        return "live_schwab"
+
+    async def get_price_history(
+        self,
+        symbol: str,
+        timeframe: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        lookback_days: int | None = None,
+    ) -> dict[str, Any]:
+        _ = symbol, start, end, lookback_days
+        self.calls += 1
+        base = datetime(2026, 5, 10, tzinfo=UTC)
+
+        def candle(hour: int) -> dict[str, Any]:
+            ts = base.replace(hour=hour, minute=0, second=0, microsecond=0)
+            return {
+                "datetime": ts.isoformat(),
+                "open": float(hour),
+                "high": float(hour),
+                "low": float(hour),
+                "close": float(hour),
+                "volume": 1,
+            }
+
+        return {"candles": [candle(10), candle(11), candle(14)]}
+
+
+@pytest.mark.asyncio
+async def test_partial_live_day_without_coverage_triggers_schwab_refetch() -> None:
+    """Stale per-day blob (no coverage key) must not satisfy a wider window when Schwab is on."""
+    mh = _MockHistorical(None, [])
+    fake = FakeRedis(decode_responses=True)
+    live = LiveCache(fake)
+    d = date(2026, 5, 10)
+    only_mid = Bar(
+        symbol="SPY",
+        timestamp=datetime(2026, 5, 10, 11, 0, tzinfo=UTC),
+        timeframe="1m",
+        open=1,
+        high=1,
+        low=1,
+        close=1,
+        volume=1,
+        source="live_schwab",
+    )
+    await live.set_live_bars_day("SPY", "1m", d, [only_mid], ttl_seconds=3600)
+    schwab = _CountingSchwab()
+    settings = Settings(
+        market_gateway_api_key="k",
+        redis_url="redis://localhost:6379/0",
+        enable_schwab_live_data=True,
+    )
+    r = DataResolver(settings, mh, live, schwab)
+    start = datetime(2026, 5, 10, 10, 0, tzinfo=UTC)
+    end = datetime(2026, 5, 10, 15, 0, tzinfo=UTC)
+    out = await r.get_bars("SPY", "1m", start=start, end=end, mode=DataMode.LIVE_ONLY)
+    assert schwab.calls == 1
+    assert len(out.bars) == 3
+    assert {int(b.close) for b in out.bars} == {10, 11, 14}
+
+    out2 = await r.get_bars("SPY", "1m", start=start, end=end, mode=DataMode.LIVE_ONLY)
+    assert schwab.calls == 1
+    assert len(out2.bars) == 3

@@ -94,8 +94,8 @@ class DataResolver:
             return []
         if timeframe not in ("1m", "1d"):
             return []
-        # Negative-cache failed backfills (empty Redis, Schwab empty/error, or still uncovered)
-        # so we do not call get_price_history on every /history while the window stays unfilled.
+        # Negative-cache failed backfills from the live Schwab client only (not stub empty
+        # candles while ENABLE_SCHWAB_LIVE_DATA is on) so we do not hammer get_price_history.
         if await self._live.live_backfill_miss_active(sym, timeframe, win_s, win_e):
             return live
         # Pull a wider range than the live window; Schwab date filtering can be
@@ -106,10 +106,12 @@ class DataResolver:
         async def _sync_backfill_miss_after_attempt() -> None:
             if await self._live.live_bars_window_covered(sym, timeframe, win_s, win_e):
                 await self._live.clear_live_backfill_miss(sym, timeframe, win_s, win_e)
-            else:
+            elif self._quote_source() == "live_schwab":
                 await self._live.set_live_backfill_miss(
                     sym, timeframe, win_s, win_e, backfill_miss_ttl
                 )
+            else:
+                await self._live.clear_live_backfill_miss(sym, timeframe, win_s, win_e)
 
         try:
             raw = await self._schwab.get_price_history(

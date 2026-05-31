@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from market_gateway.app.config import Settings
+from market_gateway.app.core.cache_keys import history_live_backfill_miss_key
 from market_gateway.app.core.models import Bar, DataMode
 from market_gateway.app.services.data_resolver import DataResolver, merge_bars_by_preference
 from market_gateway.app.services.historical_store import HistoricalStore
@@ -446,3 +447,66 @@ async def test_partial_live_retained_when_schwab_refetch_empty() -> None:
     out2 = await r.get_bars("SPY", "1m", start=start, end=end, mode=DataMode.LIVE_ONLY)
     assert schwab.calls == 1
     assert len(out2.bars) == 1
+
+
+class _CountingStubSchwab(StubSchwabClient):
+    """Stub client that counts ``get_price_history`` (always empty candles)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def get_price_history(
+        self,
+        symbol: str,
+        timeframe: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        lookback_days: int | None = None,
+    ) -> dict[str, Any]:
+        self.calls += 1
+        return await super().get_price_history(symbol, timeframe, start, end, lookback_days)
+
+
+@pytest.mark.asyncio
+async def test_stub_with_enable_schwab_does_not_negative_cache_price_history() -> None:
+    """Stub returns empty candles; we must not set bf_miss so each /history can retry Schwab."""
+    mh = _MockHistorical(None, [])
+    fake = FakeRedis(decode_responses=True)
+    live = LiveCache(fake)
+    settings = Settings(
+        market_gateway_api_key="k",
+        redis_url="redis://localhost:6379/0",
+        enable_schwab_live_data=True,
+    )
+    schwab = _CountingStubSchwab()
+    r = DataResolver(settings, mh, live, schwab)
+    start = datetime(2026, 5, 10, 10, 0, tzinfo=UTC)
+    end = datetime(2026, 5, 10, 11, 0, tzinfo=UTC)
+    await r.get_bars("SPY", "1m", start=start, end=end, mode=DataMode.LIVE_ONLY)
+    await r.get_bars("SPY", "1m", start=start, end=end, mode=DataMode.LIVE_ONLY)
+    assert schwab.calls == 2
+    miss_key = history_live_backfill_miss_key("SPY", "1m", start, end)
+    assert await fake.get(miss_key) is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_bf_miss_value_one_does_not_block_live_schwab() -> None:
+    """Older Redis keys used payload ``1``; live client must still run get_price_history."""
+    mh = _MockHistorical(None, [])
+    fake = FakeRedis(decode_responses=True)
+    live = LiveCache(fake)
+    start = datetime(2026, 5, 10, 10, 0, tzinfo=UTC)
+    end = datetime(2026, 5, 10, 14, 0, tzinfo=UTC)
+    miss_key = history_live_backfill_miss_key("SPY", "1m", start, end)
+    await fake.set(miss_key, "1", ex=600)
+    schwab = _CountingSchwab()
+    settings = Settings(
+        market_gateway_api_key="k",
+        redis_url="redis://localhost:6379/0",
+        enable_schwab_live_data=True,
+    )
+    r = DataResolver(settings, mh, live, schwab)
+    out = await r.get_bars("SPY", "1m", start=start, end=end, mode=DataMode.LIVE_ONLY)
+    assert schwab.calls == 1
+    assert len(out.bars) == 3
+    assert await fake.get(miss_key) is None

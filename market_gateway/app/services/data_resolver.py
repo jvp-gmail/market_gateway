@@ -71,11 +71,15 @@ class DataResolver:
     ) -> list[Any]:
         win_s = ensure_utc(win_start)
         win_e = ensure_utc(win_end)
+        # Bounded backoff so closed-market / entitlement gaps do not hit Schwab on every request.
+        backfill_miss_ttl = max(60, min(self._settings.history_ttl_seconds, 600))
         live = await self._live.get_live_bars(sym, timeframe, win_s, win_e)
         if live:
             if await self._live.live_bars_window_covered(sym, timeframe, win_s, win_e):
                 return live
             if not self._settings.enable_schwab_live_data:
+                return live
+            if await self._live.live_backfill_miss_active(sym, timeframe, win_s, win_e):
                 return live
         if not self._settings.enable_schwab_live_data:
             return []
@@ -83,10 +87,24 @@ class DataResolver:
             return []
         if timeframe not in ("1m", "1d"):
             return []
+        # True when Redis already had bars in-window but coverage was incomplete; used to
+        # negative-cache failed backfills so we do not call get_price_history every /history.
+        partial_uncovered = bool(live)
         # Pull a wider range than the live window; Schwab date filtering can be
         # exclusive or TZ-sensitive, then we filter to [win_s, win_e].
         fetch_start = win_s - timedelta(days=14)
         equity_sym = sym.upper()
+
+        async def _sync_backfill_miss_after_attempt() -> None:
+            if not partial_uncovered:
+                return
+            if await self._live.live_bars_window_covered(sym, timeframe, win_s, win_e):
+                await self._live.clear_live_backfill_miss(sym, timeframe, win_s, win_e)
+            else:
+                await self._live.set_live_backfill_miss(
+                    sym, timeframe, win_s, win_e, backfill_miss_ttl
+                )
+
         try:
             raw = await self._schwab.get_price_history(
                 equity_sym,
@@ -97,6 +115,7 @@ class DataResolver:
             )
         except Exception as e:
             log.warning("Schwab price history failed for %s %s: %s", sym, timeframe, e)
+            await _sync_backfill_miss_after_attempt()
             return live if live else []
         candles = raw.get("candles") if isinstance(raw, dict) else None
         if not isinstance(candles, list) or not candles:
@@ -110,6 +129,7 @@ class DataResolver:
                 win_e.isoformat(),
                 fetch_start.isoformat(),
             )
+            await _sync_backfill_miss_after_attempt()
             return live if live else []
         all_bars = schwab_candles_to_bars(sym, timeframe, candles)
         bars = [b for b in all_bars if win_s <= ensure_utc(b.timestamp) <= win_e]
@@ -122,6 +142,7 @@ class DataResolver:
                 win_s.isoformat(),
                 win_e.isoformat(),
             )
+            await _sync_backfill_miss_after_attempt()
             return live if live else []
         days_touching_window = {ensure_utc(b.timestamp).date() for b in bars}
         by_day: dict[date, list[Any]] = defaultdict(list)
@@ -144,6 +165,7 @@ class DataResolver:
                 win_s.isoformat(),
                 win_e.isoformat(),
             )
+        await _sync_backfill_miss_after_attempt()
         return out or live
 
     def _parse_event_ts(self, raw: Any) -> datetime | None:

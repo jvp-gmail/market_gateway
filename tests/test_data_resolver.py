@@ -351,6 +351,9 @@ async def test_partial_live_day_without_coverage_triggers_schwab_refetch() -> No
 
 
 class _EmptyCandlesSchwab:
+    def __init__(self) -> None:
+        self.calls = 0
+
     @property
     def quote_source_label(self) -> str:
         return "live_schwab"
@@ -364,6 +367,7 @@ class _EmptyCandlesSchwab:
         lookback_days: int | None = None,
     ) -> dict[str, Any]:
         _ = symbol, timeframe, start, end, lookback_days
+        self.calls += 1
         return {"candles": []}
 
 
@@ -391,9 +395,14 @@ async def test_partial_live_retained_when_schwab_refetch_empty() -> None:
         redis_url="redis://localhost:6379/0",
         enable_schwab_live_data=True,
     )
-    r = DataResolver(settings, mh, live, _EmptyCandlesSchwab())
+    schwab = _EmptyCandlesSchwab()
+    r = DataResolver(settings, mh, live, schwab)
     start = datetime(2026, 5, 10, 10, 0, tzinfo=UTC)
     end = datetime(2026, 5, 10, 14, 0, tzinfo=UTC)
     out = await r.get_bars("SPY", "1m", start=start, end=end, mode=DataMode.LIVE_ONLY)
+    assert schwab.calls == 1
     assert len(out.bars) == 1
     assert out.bars[0].close == 7
+    out2 = await r.get_bars("SPY", "1m", start=start, end=end, mode=DataMode.LIVE_ONLY)
+    assert schwab.calls == 1
+    assert len(out2.bars) == 1

@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 
 from market_gateway.app.core.cache_keys import (
+    history_live_backfill_miss_key,
     history_live_cov_key,
     history_live_key,
     option_chain_key,
@@ -207,6 +208,29 @@ class LiveCache:
                     return False
             d += timedelta(days=1)
         return True
+
+    async def live_backfill_miss_active(
+        self, symbol: str, timeframe: str, win_s: datetime, win_e: datetime
+    ) -> bool:
+        key = history_live_backfill_miss_key(symbol, timeframe, win_s, win_e)
+        return await self._redis.get(key) is not None
+
+    async def set_live_backfill_miss(
+        self,
+        symbol: str,
+        timeframe: str,
+        win_s: datetime,
+        win_e: datetime,
+        ttl_seconds: int,
+    ) -> None:
+        key = history_live_backfill_miss_key(symbol, timeframe, win_s, win_e)
+        await self._redis.set(key, "1", ex=max(1, ttl_seconds))
+
+    async def clear_live_backfill_miss(
+        self, symbol: str, timeframe: str, win_s: datetime, win_e: datetime
+    ) -> None:
+        key = history_live_backfill_miss_key(symbol, timeframe, win_s, win_e)
+        await self._redis.delete(key)
 
     async def merge_live_bars_window_coverage(
         self,

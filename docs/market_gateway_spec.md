@@ -486,9 +486,10 @@ Behavior:
 
 ```text
 GET /options/quotes?symbols=AAPL_20260619C00200000,AAPL_20260619P00195000
+GET /options/quotes?symbols=AAPL  260619C00200000
 ```
 
-The coding agent should inspect Schwab's actual option symbol format and Backtester4's existing option symbol conventions. Add conversion utilities if needed.
+**Symbol forms:** Clients may pass either (1) **gateway / DB style** `ROOT_YYYYMMDD{C|P}strike8` (strike × 1000, eight digits, e.g. `SPY_20260601C00756000`), or (2) **Schwab OSI** form: underlying padded on the **right with spaces to six characters**, then **YYMMDD**, **C** or **P**, then the same eight-digit strike field (e.g. `SPY   260601C00756000`). The resolver normalizes (1) to (2) before cache lookup and Schwab `GET /marketdata/v1/quotes`. Responses use the **canonical OSI** string in `option_symbol`.
 
 Behavior:
 

@@ -9,6 +9,13 @@ from market_gateway.app.core.time_utils import utc_now
 class StubSchwabClient:
     """Phase 1: deterministic sample payloads; no network or credentials."""
 
+    @property
+    def quote_source_label(self) -> str:
+        return "sample"
+
+    async def aclose(self) -> None:
+        return None
+
     async def get_quotes(self, symbols: list[str]) -> dict[str, Any]:
         now = utc_now()
         out: dict[str, Any] = {}

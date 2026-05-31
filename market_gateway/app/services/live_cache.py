@@ -170,8 +170,15 @@ class LiveCache:
             if env is None:
                 return False
             bar_lo, bar_hi = env
-            if bar_lo > need_lo or bar_hi < need_hi:
-                return False
+            # Intraday: cached min/max must span the whole requested slice. Daily bars use
+            # UTC midnight per calendar day, so bar_hi is usually far before end-of-day;
+            # require interval overlap with [need_lo, need_hi] instead.
+            if timeframe == "1d":
+                if bar_hi < need_lo or bar_lo > need_hi:
+                    return False
+            else:
+                if bar_lo > need_lo or bar_hi < need_hi:
+                    return False
             d += timedelta(days=1)
         return True
 

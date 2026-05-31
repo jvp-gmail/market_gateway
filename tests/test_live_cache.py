@@ -65,3 +65,49 @@ async def test_live_bars_window_covered_true_when_blob_spans_window() -> None:
     win_s = datetime(2026, 7, 2, 10, 0, tzinfo=UTC)
     win_e = datetime(2026, 7, 2, 14, 0, tzinfo=UTC)
     assert await live.live_bars_window_covered("Y", "1m", win_s, win_e)
+
+
+@pytest.mark.asyncio
+async def test_live_bars_window_covered_1d_midnight_bar_covers_full_utc_day() -> None:
+    """Daily bars sit at UTC midnight; need_hi is end-of-day, so span check must use overlap."""
+    fake = FakeRedis(decode_responses=True)
+    live = LiveCache(fake)
+    d = date(2026, 8, 1)
+    b = Bar(
+        symbol="Z",
+        timestamp=datetime(2026, 8, 1, 0, 0, 0, tzinfo=UTC),
+        timeframe="1d",
+        open=1,
+        high=1,
+        low=1,
+        close=1,
+        volume=1,
+        source="live_schwab",
+    )
+    await live.set_live_bars_day("Z", "1d", d, [b], ttl_seconds=3600)
+    win_s = datetime(2026, 8, 1, 0, 0, 0, tzinfo=UTC)
+    win_e = datetime(2026, 8, 1, 23, 59, 59, tzinfo=UTC)
+    assert await live.live_bars_window_covered("Z", "1d", win_s, win_e)
+
+
+@pytest.mark.asyncio
+async def test_live_bars_window_covered_1d_subwindow_without_bar_not_satisfied() -> None:
+    """1d overlap: window that excludes the lone midnight bar must not count as covered."""
+    fake = FakeRedis(decode_responses=True)
+    live = LiveCache(fake)
+    d = date(2026, 8, 2)
+    b = Bar(
+        symbol="W",
+        timestamp=datetime(2026, 8, 2, 0, 0, 0, tzinfo=UTC),
+        timeframe="1d",
+        open=1,
+        high=1,
+        low=1,
+        close=1,
+        volume=1,
+        source="live_schwab",
+    )
+    await live.set_live_bars_day("W", "1d", d, [b], ttl_seconds=3600)
+    win_s = datetime(2026, 8, 2, 12, 0, 0, tzinfo=UTC)
+    win_e = datetime(2026, 8, 2, 18, 0, 0, tzinfo=UTC)
+    assert not await live.live_bars_window_covered("W", "1d", win_s, win_e)

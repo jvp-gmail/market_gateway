@@ -317,3 +317,52 @@ async def test_partial_live_day_without_coverage_triggers_schwab_refetch() -> No
     out2 = await r.get_bars("SPY", "1m", start=start, end=end, mode=DataMode.LIVE_ONLY)
     assert schwab.calls == 1
     assert len(out2.bars) == 3
+
+
+class _EmptyCandlesSchwab:
+    @property
+    def quote_source_label(self) -> str:
+        return "live_schwab"
+
+    async def get_price_history(
+        self,
+        symbol: str,
+        timeframe: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        lookback_days: int | None = None,
+    ) -> dict[str, Any]:
+        _ = symbol, timeframe, start, end, lookback_days
+        return {"candles": []}
+
+
+@pytest.mark.asyncio
+async def test_partial_live_retained_when_schwab_refetch_empty() -> None:
+    """Incomplete window coverage triggers Schwab; empty API must not discard Redis partials."""
+    mh = _MockHistorical(None, [])
+    fake = FakeRedis(decode_responses=True)
+    live = LiveCache(fake)
+    d = date(2026, 5, 10)
+    only_mid = Bar(
+        symbol="SPY",
+        timestamp=datetime(2026, 5, 10, 11, 0, tzinfo=UTC),
+        timeframe="1m",
+        open=7,
+        high=7,
+        low=7,
+        close=7,
+        volume=1,
+        source="live_schwab",
+    )
+    await live.set_live_bars_day("SPY", "1m", d, [only_mid], ttl_seconds=3600)
+    settings = Settings(
+        market_gateway_api_key="k",
+        redis_url="redis://localhost:6379/0",
+        enable_schwab_live_data=True,
+    )
+    r = DataResolver(settings, mh, live, _EmptyCandlesSchwab())
+    start = datetime(2026, 5, 10, 10, 0, tzinfo=UTC)
+    end = datetime(2026, 5, 10, 14, 0, tzinfo=UTC)
+    out = await r.get_bars("SPY", "1m", start=start, end=end, mode=DataMode.LIVE_ONLY)
+    assert len(out.bars) == 1
+    assert out.bars[0].close == 7

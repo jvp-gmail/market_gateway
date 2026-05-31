@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -33,12 +34,22 @@ async def create_schwab_market_client(settings: Settings) -> StubSchwabClient | 
 
     from schwab.auth import client_from_token_file
 
-    inner = client_from_token_file(
-        str(path),
-        cid,
-        secret,
-        asyncio=True,
-        enforce_enums=True,
-    )
+    try:
+        inner = client_from_token_file(
+            str(path),
+            cid,
+            secret,
+            asyncio=True,
+            enforce_enums=True,
+        )
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        log.warning(
+            "Schwab token file at %s is unreadable or invalid (%s: %s); using stub client",
+            path,
+            type(e).__name__,
+            e,
+        )
+        return StubSchwabClient()
+
     log.info("Schwab live market client initialized (token file %s)", path)
     return SchwabPyMarketClient(inner, settings)

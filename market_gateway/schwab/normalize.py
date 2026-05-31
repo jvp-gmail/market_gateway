@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, time
+from datetime import UTC, date, datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -12,6 +12,34 @@ from market_gateway.app.core.models import Bar
 log = logging.getLogger(__name__)
 
 _NY = ZoneInfo("America/New_York")
+
+
+def _opt_float(v: Any) -> float | None:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt_int(v: Any) -> int | None:
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_ref_expiration(ref: dict[str, Any]) -> date | None:
+    exp = ref.get("expirationDate") or ref.get("expiration")
+    if not exp:
+        return None
+    try:
+        return date.fromisoformat(str(exp)[:10])
+    except ValueError:
+        return None
 
 
 def _ms_to_iso_utc(ms: int | float | None) -> str | None:
@@ -53,7 +81,7 @@ def normalize_equity_quote_entry(symbol: str, entry: dict[str, Any]) -> dict[str
         vol_i = int(vol) if vol is not None else None
     except (TypeError, ValueError):
         vol_i = None
-    return {
+    out: dict[str, Any] = {
         "symbol": symbol.upper(),
         "bid": float(bid) if bid is not None else None,
         "ask": float(ask) if ask is not None else None,
@@ -65,6 +93,37 @@ def normalize_equity_quote_entry(symbol: str, entry: dict[str, Any]) -> dict[str
         "quoteTime": quote_time,
         "_schwab": entry,
     }
+    # OPTION (and some mixed) payloads nest Greeks and contract metadata under `quote` / `reference`.
+    for greek in ("delta", "gamma", "theta", "vega", "rho"):
+        if greek in q:
+            out[greek] = _opt_float(q.get(greek))
+    if "volatility" in q or "impliedVolatility" in q:
+        iv = q.get("impliedVolatility")
+        if iv is None:
+            iv = q.get("volatility")
+        out["implied_volatility"] = _opt_float(iv)
+    if "openInterest" in q:
+        out["open_interest"] = _opt_int(q.get("openInterest"))
+    if "volume" in q and q.get("volume") is not None:
+        out["volume"] = _opt_int(q.get("volume"))
+
+    ref = entry.get("reference")
+    if isinstance(ref, dict):
+        u = ref.get("underlying")
+        if u is not None:
+            out["underlying_symbol"] = str(u).strip().upper()
+        if "strikePrice" in ref or ref.get("strikePrice") is not None:
+            out["strike"] = _opt_float(ref.get("strikePrice"))
+        ct = ref.get("contractType") or ref.get("putCall")
+        if isinstance(ct, str):
+            cup = ct.strip().upper()
+            if cup in ("CALL", "PUT"):
+                out["option_type"] = cup
+        exp_d = _parse_ref_expiration(ref)
+        if exp_d is not None:
+            out["expiration"] = exp_d
+
+    return out
 
 
 def normalize_quotes_response(body: dict[str, Any], requested: list[str]) -> dict[str, Any]:

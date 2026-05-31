@@ -52,7 +52,21 @@ Canonical intraday tables:
 
 Other equity timeframes return an empty historical series until added.
 
-**Stale DB + daily charts:** with **`timeframe=1d`**, **`mode=canonical_plus_live`** (or **`best_available`**), and **Postgres** configured, daily bars through the **last `date` in `stocks_1_day`** are canonical. If **Redis** has no newer `1d` live rows, the **rest of the window** is filled with deterministic **`source=sample`** daily bars until your nightly job loads new days. Each row’s `date` is returned as a bar timestamp at **UTC midnight** on that calendar date.
+### Phase 3: Schwab live read-only (quotes, chains, price history)
+
+1. Create a Schwab developer app and note **app key**, **secret**, and **callback URL** (must match the app; `https://127.0.0.1:8182` is typical).
+2. Generate a **token JSON** on a trusted machine (do not commit it), e.g.  
+   `schwab-generate-token.py --token_file /path/schwab_tokens.json --api_key ... --app_secret ... --callback_url https://127.0.0.1:8182`
+3. In `.env`: `ENABLE_SCHWAB_LIVE_DATA=true`, `SCHWAB_CLIENT_ID`, `SCHWAB_CLIENT_SECRET`, `SCHWAB_TOKEN_FILE=/path/schwab_tokens.json`.  
+   Optional: `SCHWAB_MIN_REQUEST_INTERVAL_SECONDS` (default `0.12`) to space HTTP calls.
+
+If live mode is on but credentials or the token file are missing, the gateway **falls back to the stub client** and logs a warning. **`GET /status`** includes `schwab_backend`: `live` or `stub`.
+
+With live Schwab, **`/quotes`**, **`/options/*`**, and the **live segment** of **`/history`** (when Redis has no bars yet) use the Trader API; bars are cached in Redis with the same TTLs as before. **Orders and positions** remain paper/stub for Phase 3 (no real broker orders).
+
+**Stale DB + daily charts:** with **`timeframe=1d`**, **`mode=canonical_plus_live`** (or **`best_available`**), and **Postgres** configured, daily bars through the **last `date` in `stocks_1_day`** are canonical. If **Redis** has no newer `1d` rows, the gateway tries **Schwab price history** for the gap. With **live Schwab** (`GET /status` → `schwab_backend: live`), if Schwab still returns no candles, the tail is **not** filled with deterministic **`source=sample`** bars (you see a real gap and a log warning). With the **stub** client or live data disabled, the tail still uses **`source=sample`** until your nightly job loads new days. Each row’s `date` is returned as a bar timestamp at **UTC midnight** on that calendar date.
+
+**Price history empty but quotes work:** Schwab can return `{"empty": true, "candles": []}` when the developer app lacks **Market Data** access for historical bars, or when requested dates are invalid for the account. Confirm entitlements in the Schwab developer portal and that canonical dates are not ahead of available market history. For **daily** bars the gateway uses **`get_price_history_every_day`** with **America/New_York** calendar bounds (same pattern as a working batch job: `datetime.combine(date, min/max, TZ_ET)`), not only unbounded period queries.
 
 ## Run the API
 
@@ -95,7 +109,10 @@ curl -s "http://localhost:${MARKET_GATEWAY_PORT}/health"
 curl -s -H "X-API-Key: $MARKET_GATEWAY_API_KEY" \
   "http://localhost:${MARKET_GATEWAY_PORT}/quotes?symbols=SPY,AAPL,NVDA"
 
-# SPY daily bars: `stocks_1_day` through last loaded `date`, then sample tail if Redis has no newer 1d rows
+# Option quote: gateway id `ROOT_YYYYMMDD{C|P}strike8` is normalized to Schwab OSI (6-char root + spaces)
+curl -s -H "X-API-Key: $MARKET_GATEWAY_API_KEY" \
+  "http://localhost:${MARKET_GATEWAY_PORT}/options/quotes?symbols=SPY_20260601C00756000"
+# SPY daily bars: canonical through last `stocks_1_day` date, then Schwab (live) or sample tail (stub / live off)
 curl -s -H "X-API-Key: $MARKET_GATEWAY_API_KEY" \
   "http://localhost:${MARKET_GATEWAY_PORT}/history/SPY?timeframe=1d&lookback_days=14&mode=canonical_plus_live"
 ```
@@ -115,8 +132,8 @@ You may expose only the FastAPI port on the tailnet. **Do not rely on Tailscale 
 | Phase | Scope |
 |-------|--------|
 | 1 | FastAPI skeleton, Redis, stubs, SSE, tests (current baseline) |
-| 2 | Timescale historical reads + resolver modes (partially implemented via `DATABASE_URL`) |
-| 3 | Schwab read-only live data |
+| 2 | Timescale historical reads + resolver modes (`DATABASE_URL` / `POSTGRES_*`) |
+| 3 | Schwab read-only live data ([schwab-py](https://github.com/alexgolec/schwab-py); token file + `ENABLE_SCHWAB_LIVE_DATA`) |
 | 4 | Streaming + shadow testing |
 | 5 | Paper trading lifecycle |
 | 6 | Real trading (explicit gates) |

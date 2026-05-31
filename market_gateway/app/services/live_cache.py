@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 
+from redis.asyncio.client import Pipeline
+
 from market_gateway.app.core.cache_keys import (
+    history_live_backfill_miss_key,
+    history_live_cov_key,
     history_live_key,
     option_chain_key,
     option_quote_key,
@@ -18,6 +22,10 @@ if TYPE_CHECKING:
     from redis.asyncio import Redis
 
 log = logging.getLogger(__name__)
+
+# Only ``live_schwab`` failures populate the backfill-miss key so stub/legacy
+# ``"1"`` keys do not suppress ``get_price_history`` after a live client is available.
+HISTORY_LIVE_BACKFILL_MISS_PAYLOAD = "live_schwab"
 
 
 def _model_json(model: Any) -> str:
@@ -102,12 +110,239 @@ class LiveCache:
         bars.sort(key=lambda b: b.timestamp)
         return bars
 
+    def _utc_day_start(self, d: date) -> datetime:
+        return datetime.combine(d, time.min, tzinfo=UTC)
+
+    def _utc_day_bar_ts_envelope(
+        self, bar_list: list[Any], day_start: datetime, day_end_excl: datetime
+    ) -> tuple[datetime, datetime] | None:
+        """Min/max bar timestamps within [day_start, day_end_excl). None if no usable bars."""
+        lo: datetime | None = None
+        hi: datetime | None = None
+        for b in bar_list:
+            try:
+                bar = Bar.model_validate(b)
+            except ValueError:
+                return None
+            ts = ensure_utc(bar.timestamp)
+            if ts < day_start or ts >= day_end_excl:
+                continue
+            if lo is None or ts < lo:
+                lo = ts
+            if hi is None or ts > hi:
+                hi = ts
+        if lo is None or hi is None:
+            return None
+        return (lo, hi)
+
+    def _bar_list_has_ts_in_closed_range(
+        self,
+        bar_list: list[Any],
+        day_start: datetime,
+        day_end_excl: datetime,
+        need_lo: datetime,
+        need_hi: datetime,
+    ) -> bool:
+        for b in bar_list:
+            try:
+                bar = Bar.model_validate(b)
+            except ValueError:
+                continue
+            ts = ensure_utc(bar.timestamp)
+            if ts < day_start or ts >= day_end_excl:
+                continue
+            if need_lo <= ts <= need_hi:
+                return True
+        return False
+
+    async def live_bars_window_covered(
+        self,
+        symbol: str,
+        timeframe: str,
+        win_s: datetime,
+        win_e: datetime,
+    ) -> bool:
+        """True if each touched UTC day's cached bars span that day's slice of [win_s, win_e].
+
+        Uses min/max bar timestamps in the per-day Redis blob. ``history_live_cov`` is not
+        consulted: it can remain wider than the blob after partial writes.
+        """
+        start_u = ensure_utc(win_s)
+        end_u = ensure_utc(win_e)
+        d = start_u.date()
+        end_day = end_u.date()
+        while d <= end_day:
+            day_start = self._utc_day_start(d)
+            day_end_excl = day_start + timedelta(days=1)
+            if end_u < day_start or start_u >= day_end_excl:
+                d += timedelta(days=1)
+                continue
+            need_lo = max(start_u, day_start)
+            need_hi = min(end_u, day_end_excl - timedelta(microseconds=1))
+            if need_lo > need_hi:
+                d += timedelta(days=1)
+                continue
+            day_iso = d.isoformat()
+            bars_key = history_live_key(symbol, timeframe, day_iso)
+            raw_bars = await self._redis.get(bars_key)
+            if raw_bars is None:
+                return False
+            try:
+                bar_list = json.loads(raw_bars)
+            except (json.JSONDecodeError, TypeError):
+                return False
+            if not isinstance(bar_list, list) or len(bar_list) == 0:
+                return False
+            env = self._utc_day_bar_ts_envelope(bar_list, day_start, day_end_excl)
+            if env is None:
+                return False
+            bar_lo, bar_hi = env
+            # Intraday: min/max must bracket the slice, and at least one bar must fall inside
+            # [need_lo, need_hi]. Otherwise sparse bars (e.g. only session open/close) can make
+            # the envelope span the window while get_live_bars returns nothing for that slice.
+            if timeframe == "1d":
+                # Daily bars use UTC midnight per calendar day, so bar_hi is usually far before
+                # end-of-day; require interval overlap with [need_lo, need_hi], then at least one
+                # bar timestamp in that slice (envelope alone can span the slice without a bar in it).
+                if bar_hi < need_lo or bar_lo > need_hi:
+                    return False
+                if not self._bar_list_has_ts_in_closed_range(
+                    bar_list, day_start, day_end_excl, need_lo, need_hi
+                ):
+                    return False
+            else:
+                if bar_lo > need_lo or bar_hi < need_hi:
+                    return False
+                if not self._bar_list_has_ts_in_closed_range(
+                    bar_list, day_start, day_end_excl, need_lo, need_hi
+                ):
+                    return False
+            d += timedelta(days=1)
+        return True
+
+    async def live_backfill_miss_active(
+        self, symbol: str, timeframe: str, win_s: datetime, win_e: datetime
+    ) -> bool:
+        key = history_live_backfill_miss_key(symbol, timeframe, win_s, win_e)
+        raw = await self._redis.get(key)
+        if raw == HISTORY_LIVE_BACKFILL_MISS_PAYLOAD:
+            return True
+        if raw is not None:
+            # Legacy ``"1"`` from older builds or any unexpected value: do not suppress API.
+            await self._redis.delete(key)
+        return False
+
+    async def set_live_backfill_miss(
+        self,
+        symbol: str,
+        timeframe: str,
+        win_s: datetime,
+        win_e: datetime,
+        ttl_seconds: int,
+    ) -> None:
+        key = history_live_backfill_miss_key(symbol, timeframe, win_s, win_e)
+        await self._redis.set(
+            key, HISTORY_LIVE_BACKFILL_MISS_PAYLOAD, ex=max(1, ttl_seconds)
+        )
+
+    async def clear_live_backfill_miss(
+        self, symbol: str, timeframe: str, win_s: datetime, win_e: datetime
+    ) -> None:
+        key = history_live_backfill_miss_key(symbol, timeframe, win_s, win_e)
+        await self._redis.delete(key)
+
+    async def merge_live_bars_window_coverage(
+        self,
+        symbol: str,
+        timeframe: str,
+        day: date,
+        win_s: datetime,
+        win_e: datetime,
+        ttl_seconds: int,
+    ) -> None:
+        """Expand stored coverage union for this day to include [win_s, win_e]."""
+        key = history_live_cov_key(symbol, timeframe, day.isoformat())
+        ws = ensure_utc(win_s)
+        we = ensure_utc(win_e)
+        raw = await self._redis.get(key)
+        if raw:
+            try:
+                prev = json.loads(raw)
+                lo = ensure_utc(
+                    datetime.fromisoformat(str(prev["lo"]).replace("Z", "+00:00"))
+                )
+                hi = ensure_utc(
+                    datetime.fromisoformat(str(prev["hi"]).replace("Z", "+00:00"))
+                )
+                lo = min(lo, ws)
+                hi = max(hi, we)
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                lo, hi = ws, we
+        else:
+            lo, hi = ws, we
+        payload = json.dumps({"lo": lo.isoformat(), "hi": hi.isoformat()})
+        await self._redis.set(key, payload, ex=ttl_seconds)
+
     async def set_live_bars_day(
         self, symbol: str, timeframe: str, day: date, bars: list[Bar], ttl_seconds: int
     ) -> None:
         key = history_live_key(symbol, timeframe, day.isoformat())
         payload = json.dumps([b.model_dump(mode="json") for b in bars], default=str)
         await self._redis.set(key, payload, ex=ttl_seconds)
+
+    def _merged_live_bars_day_payload(
+        self,
+        raw: str | None,
+        day_start: datetime,
+        day_end_excl: datetime,
+        bars: list[Bar],
+    ) -> str:
+        existing: list[Bar] = []
+        if raw:
+            try:
+                existing = [Bar.model_validate(x) for x in json.loads(raw)]
+            except (json.JSONDecodeError, ValueError):
+                existing = []
+        existing = [
+            b
+            for b in existing
+            if day_start <= ensure_utc(b.timestamp) < day_end_excl
+        ]
+        by_ts: dict[datetime, Bar] = {ensure_utc(b.timestamp): b for b in existing}
+        for b in bars:
+            ts = ensure_utc(b.timestamp)
+            if day_start <= ts < day_end_excl:
+                by_ts[ts] = b
+        merged = sorted(by_ts.values(), key=lambda b: ensure_utc(b.timestamp))
+        return json.dumps([b.model_dump(mode="json") for b in merged], default=str)
+
+    async def merge_live_bars_day(
+        self, symbol: str, timeframe: str, day: date, bars: list[Bar], ttl_seconds: int
+    ) -> None:
+        """Union per-day Redis bars with ``bars``; incoming wins on duplicate UTC timestamps.
+
+        Schwab history is requested with ``end`` at the current window; without merging, a
+        narrower ``win_e`` would replace the blob with only candles through that instant and
+        drop later intraday bars already cached from a wider fetch.
+
+        The merge is applied inside a Redis optimistic transaction (``WATCH`` / ``MULTI`` /
+        ``EXEC``) so concurrent backfills or ``/history`` paths for the same key cannot drop
+        each other's bars: if the blob changes between read and write, the transaction aborts
+        and retries with fresh state.
+        """
+        key = history_live_key(symbol, timeframe, day.isoformat())
+        day_start = self._utc_day_start(day)
+        day_end_excl = day_start + timedelta(days=1)
+
+        async def _merge_tx(pipe: Pipeline) -> None:
+            raw_tx = await pipe.get(key)
+            payload = self._merged_live_bars_day_payload(
+                raw_tx, day_start, day_end_excl, bars
+            )
+            pipe.multi()
+            pipe.set(key, payload, ex=ttl_seconds)
+
+        await self._redis.transaction(_merge_tx, key)
 
     async def set_live_bar(self, bar: Bar, ttl_seconds: int = 86400) -> None:
         """Upsert one bar into the per-day Redis blob for live/session bars."""

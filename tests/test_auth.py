@@ -10,3 +10,4 @@ def test_status_ok(client, auth_headers) -> None:
     assert body["ok"] is True
     assert body["redis"] == "ok"
     assert body["database"] in ("not_configured", "ok", "error")
+    assert body.get("schwab_backend") == "stub"

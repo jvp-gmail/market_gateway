@@ -12,6 +12,7 @@ import asyncpg
 
 from market_gateway.app.core.models import Bar
 from market_gateway.app.core.time_utils import ensure_utc
+from market_gateway.schwab.option_symbol import is_option_contract_symbol
 
 log = logging.getLogger(__name__)
 
@@ -55,11 +56,6 @@ def _day_table_row_to_bar(
         volume=int(row.get("volume") or 0),
         source=source,
     )
-
-
-def is_option_contract_symbol(symbol: str) -> bool:
-    """Heuristic: OCC-style option symbols contain an underscore."""
-    return "_" in symbol
 
 
 def _row_to_bar(

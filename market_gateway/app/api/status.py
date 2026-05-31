@@ -32,5 +32,11 @@ async def status(request: Request) -> dict:
         "redis": redis_ok,
         "database": database,
         "schwab_live_data_enabled": settings.enable_schwab_live_data,
+        "schwab_backend": (
+            "live"
+            if getattr(request.app.state.schwab_client, "quote_source_label", None)
+            == "live_schwab"
+            else "stub"
+        ),
         "real_trading_enabled": settings.enable_real_trading,
     }

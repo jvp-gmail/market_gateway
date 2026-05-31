@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     postgres_dbname: str = "marketdata"
 
     enable_schwab_live_data: bool = False
+    # Phase 3 Schwab Trader API (token from disk; never commit token file).
+    schwab_client_id: str | None = None
+    schwab_client_secret: str | None = None
+    schwab_redirect_uri: str | None = None  # required for OAuth app registration; token file flow uses token on disk
+    schwab_token_file: str | None = None
+    # Minimum spacing between Schwab HTTP calls (client-side throttle).
+    schwab_min_request_interval_seconds: float = 0.12
     enable_real_trading: bool = False
     quote_ttl_seconds: int = 3
     option_quote_ttl_seconds: int = 3

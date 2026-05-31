@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -18,13 +19,17 @@ from market_gateway.app.core.time_utils import ensure_utc, utc_now
 from market_gateway.app.services.historical_store import (
     PostgresHistoricalStore,
     _deterministic_sample_bars,
+)
+from market_gateway.schwab.normalize import schwab_candles_to_bars
+from market_gateway.schwab.option_symbol import (
+    gateway_option_symbol,
     is_option_contract_symbol,
+    schwab_option_symbol,
 )
 
 if TYPE_CHECKING:
     from market_gateway.app.services.historical_store import HistoricalStore
     from market_gateway.app.services.live_cache import LiveCache
-    from market_gateway.schwab.client import StubSchwabClient
 
 log = logging.getLogger(__name__)
 
@@ -41,18 +46,135 @@ def merge_bars_by_preference(historical: list[Any], live: list[Any]) -> list[Any
     return sorted(by_ts.values(), key=lambda x: ensure_utc(x.timestamp))
 
 
+def _option_bars_as_client_symbol(raw_sym: str, sym_key: str, bars: list[Any]) -> list[Any]:
+    """Align each bar's ``symbol`` with the option id the client sent (e.g. OSI vs gateway underscore)."""
+    if not bars or raw_sym == sym_key:
+        return bars
+    return [b.model_copy(update={"symbol": raw_sym}) for b in bars]
+
+
 class DataResolver:
     def __init__(
         self,
         settings: Settings,
         historical: HistoricalStore,
         live: LiveCache,
-        schwab: StubSchwabClient,
+        schwab: Any,
     ) -> None:
         self._settings = settings
         self._historical = historical
         self._live = live
         self._schwab = schwab
+
+    def _quote_source(self) -> str:
+        return getattr(self._schwab, "quote_source_label", "sample")
+
+    async def _live_bars_for_window(
+        self,
+        sym: str,
+        timeframe: str,
+        win_start: datetime,
+        win_end: datetime,
+    ) -> list[Any]:
+        win_s = ensure_utc(win_start)
+        win_e = ensure_utc(win_end)
+        # Bounded backoff so closed-market / entitlement gaps do not hit Schwab on every request.
+        backfill_miss_ttl = max(60, min(self._settings.history_ttl_seconds, 600))
+        live = await self._live.get_live_bars(sym, timeframe, win_s, win_e)
+        if live:
+            if await self._live.live_bars_window_covered(sym, timeframe, win_s, win_e):
+                return live
+            if not self._settings.enable_schwab_live_data:
+                return live
+            if await self._live.live_backfill_miss_active(sym, timeframe, win_s, win_e):
+                return live
+        if not self._settings.enable_schwab_live_data:
+            return []
+        if is_option_contract_symbol(sym):
+            return []
+        if timeframe not in ("1m", "1d"):
+            return []
+        # Negative-cache failed backfills from the live Schwab client only (not stub empty
+        # candles while ENABLE_SCHWAB_LIVE_DATA is on) so we do not hammer get_price_history.
+        if await self._live.live_backfill_miss_active(sym, timeframe, win_s, win_e):
+            return live
+        # Pull a wider range than the live window; Schwab date filtering can be
+        # exclusive or TZ-sensitive, then we filter to [win_s, win_e].
+        fetch_start = win_s - timedelta(days=14)
+        equity_sym = sym.upper()
+
+        async def _sync_backfill_miss_after_attempt() -> None:
+            if await self._live.live_bars_window_covered(sym, timeframe, win_s, win_e):
+                await self._live.clear_live_backfill_miss(sym, timeframe, win_s, win_e)
+            elif self._quote_source() == "live_schwab":
+                await self._live.set_live_backfill_miss(
+                    sym, timeframe, win_s, win_e, backfill_miss_ttl
+                )
+            else:
+                await self._live.clear_live_backfill_miss(sym, timeframe, win_s, win_e)
+
+        try:
+            raw = await self._schwab.get_price_history(
+                equity_sym,
+                timeframe,
+                start=fetch_start,
+                end=win_e,
+                lookback_days=None,
+            )
+        except Exception as e:
+            log.warning("Schwab price history failed for %s %s: %s", sym, timeframe, e)
+            await _sync_backfill_miss_after_attempt()
+            return live if live else []
+        candles = raw.get("candles") if isinstance(raw, dict) else None
+        if not isinstance(candles, list) or not candles:
+            log.warning(
+                "Schwab %s %s: no candles in response (empty=%s keys=%s) window=%s..%s fetch_start=%s",
+                sym,
+                timeframe,
+                (raw.get("empty") if isinstance(raw, dict) else None),
+                (list(raw.keys()) if isinstance(raw, dict) else None),
+                win_s.isoformat(),
+                win_e.isoformat(),
+                fetch_start.isoformat(),
+            )
+            await _sync_backfill_miss_after_attempt()
+            return live if live else []
+        all_bars = schwab_candles_to_bars(sym, timeframe, candles)
+        bars = [b for b in all_bars if win_s <= ensure_utc(b.timestamp) <= win_e]
+        if not bars:
+            log.warning(
+                "Schwab %s %s: %d raw candles produced 0 bars in [%s, %s] after filter",
+                sym,
+                timeframe,
+                len(candles),
+                win_s.isoformat(),
+                win_e.isoformat(),
+            )
+            await _sync_backfill_miss_after_attempt()
+            return live if live else []
+        days_touching_window = {ensure_utc(b.timestamp).date() for b in bars}
+        by_day: dict[date, list[Any]] = defaultdict(list)
+        for b in all_bars:
+            if ensure_utc(b.timestamp).date() in days_touching_window:
+                by_day[ensure_utc(b.timestamp).date()].append(b)
+        ttl = self._settings.history_ttl_seconds
+        for day0, day_bars in by_day.items():
+            await self._live.merge_live_bars_day(sym, timeframe, day0, day_bars, ttl)
+            await self._live.merge_live_bars_window_coverage(
+                sym, timeframe, day0, win_s, win_e, ttl
+            )
+        out = await self._live.get_live_bars(sym, timeframe, win_s, win_e)
+        if not out:
+            log.warning(
+                "Schwab %s %s: wrote %d bars but Redis read returned empty for window %s..%s",
+                sym,
+                timeframe,
+                len(bars),
+                win_s.isoformat(),
+                win_e.isoformat(),
+            )
+        await _sync_backfill_miss_after_attempt()
+        return out or live
 
     def _parse_event_ts(self, raw: Any) -> datetime | None:
         if raw is None:
@@ -83,9 +205,23 @@ class DataResolver:
             return merged
         if live_start > end_u:
             return merged
-        sym_key = sym if is_option_contract_symbol(sym) else sym.upper()
+        if (
+            self._settings.enable_schwab_live_data
+            and self._quote_source() == "live_schwab"
+        ):
+            log.warning(
+                "Skipping deterministic sample tail for %s %s: live Schwab client active "
+                "but no live bars in [%s, %s]. Schwab price history returned empty — "
+                "check Market Data subscriptions in the Schwab developer portal, and that "
+                "canonical DB dates are not ahead of real market history.",
+                sym,
+                timeframe,
+                live_start.isoformat(),
+                end_u.isoformat(),
+            )
+            return merged
         sample_tail = _deterministic_sample_bars(
-            sym_key, timeframe, live_start, end_u, source="sample"
+            sym, timeframe, live_start, end_u, source="sample"
         )
         if not sample_tail:
             return merged
@@ -97,12 +233,8 @@ class DataResolver:
         if cached:
             return cached
 
-        if self._settings.enable_schwab_live_data:
-            raw = await self._schwab.get_quotes([sym])
-            q = (raw.get("quotes") or {}).get(sym) or {}
-        else:
-            raw = await self._schwab.get_quotes([sym])
-            q = (raw.get("quotes") or {}).get(sym) or {}
+        raw = await self._schwab.get_quotes([sym])
+        q = (raw.get("quotes") or {}).get(sym) or {}
 
         now = utc_now()
         snap = QuoteSnapshot(
@@ -116,34 +248,47 @@ class DataResolver:
             last=q.get("last"),
             mark=q.get("mark"),
             volume=q.get("totalVolume"),
-            source="sample",
+            source=self._quote_source(),
             raw=q or None,
         )
         await self._live.set_quote(snap, self._settings.quote_ttl_seconds)
         return snap
 
     async def get_option_quote(self, option_symbol: str) -> OptionContractQuote:
-        cached = await self._live.get_option_quote(option_symbol)
+        osi = schwab_option_symbol(option_symbol)
+        cached = await self._live.get_option_quote(osi)
         if cached:
             return cached
 
-        raw = await self._schwab.get_option_quotes([option_symbol])
-        q = (raw.get("quotes") or {}).get(option_symbol) or {}
+        raw = await self._schwab.get_option_quotes([osi])
+        quotes = raw.get("quotes") or {}
+        q = quotes.get(osi) or quotes.get(option_symbol.strip()) or {}
         now = utc_now()
+        exp_raw = q.get("expiration")
+        exp: date | None = exp_raw if isinstance(exp_raw, date) else None
         oc = OptionContractQuote(
-            option_symbol=option_symbol,
-            underlying_symbol=None,
-            expiration=None,
-            strike=None,
-            option_type=None,
+            option_symbol=osi,
+            underlying_symbol=q.get("underlying_symbol"),
+            expiration=exp,
+            strike=float(q["strike"]) if q.get("strike") is not None else None,
+            option_type=q.get("option_type"),
             event_ts=self._parse_event_ts(q.get("quoteTime")),
             received_ts=now,
             bid=q.get("bid"),
             ask=q.get("ask"),
+            bid_size=q.get("bidSize"),
+            ask_size=q.get("askSize"),
             last=q.get("last"),
             mark=q.get("mark"),
             delta=q.get("delta"),
-            source="sample",
+            gamma=q.get("gamma"),
+            theta=q.get("theta"),
+            vega=q.get("vega"),
+            rho=q.get("rho"),
+            implied_volatility=q.get("implied_volatility"),
+            open_interest=q.get("open_interest"),
+            volume=q.get("volume") if q.get("volume") is not None else q.get("totalVolume"),
+            source=self._quote_source(),
             raw=q or None,
         )
         await self._live.set_option_quote(oc, self._settings.option_quote_ttl_seconds)
@@ -188,7 +333,7 @@ class DataResolver:
                     last=c.get("last"),
                     mark=c.get("mark"),
                     delta=c.get("delta"),
-                    source="sample",
+                    source=self._quote_source(),
                     raw=c,
                 )
             )
@@ -197,7 +342,7 @@ class DataResolver:
             underlying_price=raw.get("underlyingPrice"),
             requested_at=self._parse_event_ts(raw.get("requestedAt")) or now,
             received_ts=now,
-            source="sample",
+            source=self._quote_source(),
             contracts=contracts,
         )
         await self._live.set_option_chain(key, resp, self._settings.option_chain_ttl_seconds)
@@ -221,15 +366,18 @@ class DataResolver:
         else:
             start_u = end_u - timedelta(days=7)
 
-        sym = symbol
+        raw_sym = symbol
+        is_opt = is_option_contract_symbol(raw_sym)
+        sym_key = gateway_option_symbol(raw_sym) if is_opt else raw_sym.upper()
 
         if mode == DataMode.HISTORICAL_ONLY:
-            if is_option_contract_symbol(sym):
-                bars = await self._historical.get_option_bars(sym, timeframe, start_u, end_u)
+            if is_opt:
+                bars = await self._historical.get_option_bars(sym_key, timeframe, start_u, end_u)
+                bars = _option_bars_as_client_symbol(raw_sym, sym_key, bars)
             else:
-                bars = await self._historical.get_equity_bars(sym.upper(), timeframe, start_u, end_u)
+                bars = await self._historical.get_equity_bars(sym_key, timeframe, start_u, end_u)
             return HistoricalDataResponse(
-                symbol=sym,
+                symbol=raw_sym,
                 timeframe=timeframe,
                 mode=mode.value,
                 start=start_u,
@@ -238,9 +386,11 @@ class DataResolver:
             )
 
         if mode == DataMode.LIVE_ONLY:
-            live = await self._live.get_live_bars(sym, timeframe, start_u, end_u)
+            live = await self._live_bars_for_window(sym_key, timeframe, start_u, end_u)
+            if is_opt:
+                live = _option_bars_as_client_symbol(raw_sym, sym_key, live)
             return HistoricalDataResponse(
-                symbol=sym,
+                symbol=raw_sym,
                 timeframe=timeframe,
                 mode=mode.value,
                 start=start_u,
@@ -249,44 +399,44 @@ class DataResolver:
             )
 
         # canonical_plus_live and best_available
-        lf = await self._historical.get_last_finalized_timestamp(
-            sym if is_option_contract_symbol(sym) else sym.upper(),
-            timeframe,
-        )
+        lf = await self._historical.get_last_finalized_timestamp(sym_key, timeframe)
         hist: list[Any] = []
         if lf is None:
-            if is_option_contract_symbol(sym):
-                hist = await self._historical.get_option_bars(sym, timeframe, start_u, end_u)
+            if is_opt:
+                hist = await self._historical.get_option_bars(sym_key, timeframe, start_u, end_u)
             else:
-                hist = await self._historical.get_equity_bars(sym.upper(), timeframe, start_u, end_u)
-            live = await self._live.get_live_bars(sym, timeframe, start_u, end_u)
+                hist = await self._historical.get_equity_bars(sym_key, timeframe, start_u, end_u)
+            live = await self._live_bars_for_window(sym_key, timeframe, start_u, end_u)
             merged = merge_bars_by_preference(hist, live)
         else:
             lf_u = ensure_utc(lf)
             hist_end = min(end_u, lf_u)
             live_start = max(start_u, lf_u)
             # Daily canonical rows use one timestamp per session/day; start sample/live tail next UTC day.
-            if timeframe == "1d" and not is_option_contract_symbol(sym):
+            if timeframe == "1d" and not is_opt:
                 live_start = max(start_u, lf_u + timedelta(days=1))
             if start_u <= hist_end:
-                if is_option_contract_symbol(sym):
+                if is_opt:
                     hist = await self._historical.get_option_bars(
-                        sym, timeframe, start_u, hist_end
+                        sym_key, timeframe, start_u, hist_end
                     )
                 else:
                     hist = await self._historical.get_equity_bars(
-                        sym.upper(), timeframe, start_u, hist_end
+                        sym_key, timeframe, start_u, hist_end
                     )
             live: list[Any] = []
             if live_start <= end_u:
-                live = await self._live.get_live_bars(sym, timeframe, live_start, end_u)
+                live = await self._live_bars_for_window(sym_key, timeframe, live_start, end_u)
             merged = merge_bars_by_preference(hist, live)
             merged = self._append_sample_tail_when_live_empty(
-                merged, sym, timeframe, mode, live, live_start, end_u
+                merged, sym_key, timeframe, mode, live, live_start, end_u
             )
 
+        if is_opt:
+            merged = _option_bars_as_client_symbol(raw_sym, sym_key, merged)
+
         return HistoricalDataResponse(
-            symbol=sym,
+            symbol=raw_sym,
             timeframe=timeframe,
             mode=mode.value,
             start=start_u,

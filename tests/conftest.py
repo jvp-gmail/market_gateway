@@ -21,6 +21,15 @@ def _unit_tests_ignore_repo_postgres(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POSTGRES_PASSWORD", "")
 
 
+@pytest.fixture(autouse=True)
+def _unit_tests_disable_schwab_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Avoid loading real Schwab token / network when repo .env enables live mode."""
+    monkeypatch.setenv("ENABLE_SCHWAB_LIVE_DATA", "false")
+    monkeypatch.setenv("SCHWAB_CLIENT_ID", "")
+    monkeypatch.setenv("SCHWAB_CLIENT_SECRET", "")
+    monkeypatch.setenv("SCHWAB_TOKEN_FILE", "")
+
+
 @pytest.fixture
 def fake_redis() -> FakeRedis:
     return FakeRedis(decode_responses=True)

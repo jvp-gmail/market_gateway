@@ -18,7 +18,6 @@ from market_gateway.app.core.models import (
 )
 from market_gateway.app.core.time_utils import utc_now
 from market_gateway.app.deps import get_event_bus, get_redis, get_settings_from_app
-from market_gateway.schwab.client import StubSchwabClient
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -35,7 +34,7 @@ async def orders_preview(
     bus: EventBus = Depends(get_event_bus),
 ) -> OrderPreviewResponse:
     redis = get_redis(request)
-    schwab: StubSchwabClient = request.app.state.schwab_client
+    schwab: Any = request.app.state.schwab_client
     raw = await schwab.preview_order(body.model_dump())
     preview_id = str(uuid.uuid4())
     payload = {
@@ -77,7 +76,7 @@ async def orders_submit(
     if not raw_prev:
         raise HTTPException(status_code=400, detail="Invalid or expired preview_id")
 
-    schwab: StubSchwabClient = request.app.state.schwab_client
+    schwab: Any = request.app.state.schwab_client
     # Phase 1: never call real submit — stub only
     out = await schwab.submit_order(
         {

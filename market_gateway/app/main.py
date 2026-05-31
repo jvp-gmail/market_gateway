@@ -13,7 +13,7 @@ from market_gateway.app.core.event_bus import EventBus
 from market_gateway.app.services.data_resolver import DataResolver
 from market_gateway.app.services.historical_store import create_historical_store
 from market_gateway.app.services.live_cache import LiveCache
-from market_gateway.schwab.client import StubSchwabClient
+from market_gateway.schwab.factory import create_schwab_market_client
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -33,7 +33,7 @@ def create_app(*, redis_client: Redis | None = None) -> FastAPI:
 
         historical = await create_historical_store(settings.resolved_asyncpg_dsn())
         live = LiveCache(rc)
-        schwab = StubSchwabClient()
+        schwab = await create_schwab_market_client(settings)
         resolver = DataResolver(settings, historical, live, schwab)
         bus = EventBus(
             rc,
@@ -49,6 +49,10 @@ def create_app(*, redis_client: Redis | None = None) -> FastAPI:
         app.state.event_bus = bus
 
         yield
+
+        closer_schwab = getattr(schwab, "aclose", None)
+        if closer_schwab is not None:
+            await closer_schwab()
 
         await rc.aclose()
         closer = getattr(historical, "close", None)

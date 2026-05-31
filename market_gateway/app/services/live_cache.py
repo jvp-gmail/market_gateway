@@ -5,6 +5,8 @@ import logging
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 
+from redis.asyncio.client import Pipeline
+
 from market_gateway.app.core.cache_keys import (
     history_live_backfill_miss_key,
     history_live_cov_key,
@@ -276,20 +278,14 @@ class LiveCache:
         payload = json.dumps([b.model_dump(mode="json") for b in bars], default=str)
         await self._redis.set(key, payload, ex=ttl_seconds)
 
-    async def merge_live_bars_day(
-        self, symbol: str, timeframe: str, day: date, bars: list[Bar], ttl_seconds: int
-    ) -> None:
-        """Union per-day Redis bars with ``bars``; incoming wins on duplicate UTC timestamps.
-
-        Schwab history is requested with ``end`` at the current window; without merging, a
-        narrower ``win_e`` would replace the blob with only candles through that instant and
-        drop later intraday bars already cached from a wider fetch.
-        """
-        key = history_live_key(symbol, timeframe, day.isoformat())
-        day_start = self._utc_day_start(day)
-        day_end_excl = day_start + timedelta(days=1)
+    def _merged_live_bars_day_payload(
+        self,
+        raw: str | None,
+        day_start: datetime,
+        day_end_excl: datetime,
+        bars: list[Bar],
+    ) -> str:
         existing: list[Bar] = []
-        raw = await self._redis.get(key)
         if raw:
             try:
                 existing = [Bar.model_validate(x) for x in json.loads(raw)]
@@ -306,8 +302,35 @@ class LiveCache:
             if day_start <= ts < day_end_excl:
                 by_ts[ts] = b
         merged = sorted(by_ts.values(), key=lambda b: ensure_utc(b.timestamp))
-        payload = json.dumps([b.model_dump(mode="json") for b in merged], default=str)
-        await self._redis.set(key, payload, ex=ttl_seconds)
+        return json.dumps([b.model_dump(mode="json") for b in merged], default=str)
+
+    async def merge_live_bars_day(
+        self, symbol: str, timeframe: str, day: date, bars: list[Bar], ttl_seconds: int
+    ) -> None:
+        """Union per-day Redis bars with ``bars``; incoming wins on duplicate UTC timestamps.
+
+        Schwab history is requested with ``end`` at the current window; without merging, a
+        narrower ``win_e`` would replace the blob with only candles through that instant and
+        drop later intraday bars already cached from a wider fetch.
+
+        The merge is applied inside a Redis optimistic transaction (``WATCH`` / ``MULTI`` /
+        ``EXEC``) so concurrent backfills or ``/history`` paths for the same key cannot drop
+        each other's bars: if the blob changes between read and write, the transaction aborts
+        and retries with fresh state.
+        """
+        key = history_live_key(symbol, timeframe, day.isoformat())
+        day_start = self._utc_day_start(day)
+        day_end_excl = day_start + timedelta(days=1)
+
+        async def _merge_tx(pipe: Pipeline) -> None:
+            raw_tx = await pipe.get(key)
+            payload = self._merged_live_bars_day_payload(
+                raw_tx, day_start, day_end_excl, bars
+            )
+            pipe.multi()
+            pipe.set(key, payload, ex=ttl_seconds)
+
+        await self._redis.transaction(_merge_tx, key)
 
     async def set_live_bar(self, bar: Bar, ttl_seconds: int = 86400) -> None:
         """Upsert one bar into the per-day Redis blob for live/session bars."""

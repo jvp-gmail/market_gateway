@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, date, datetime
 
 import pytest
@@ -204,3 +205,35 @@ async def test_merge_live_bars_day_incoming_wins_duplicate_timestamp() -> None:
     got = await live.get_live_bars("M", "1m", ts, ts)
     assert len(got) == 1
     assert got[0].close == 99
+
+
+@pytest.mark.asyncio
+async def test_merge_live_bars_day_concurrent_union_all_timestamps() -> None:
+    """Many coroutines merging disjoint bars into the same day must not drop updates."""
+    fake = FakeRedis(decode_responses=True)
+    live = LiveCache(fake)
+    d = date(2026, 9, 3)
+
+    async def merge_hour(h: int) -> None:
+        b = Bar(
+            symbol="M",
+            timestamp=datetime(2026, 9, 3, h, 0, tzinfo=UTC),
+            timeframe="1m",
+            open=1,
+            high=1,
+            low=1,
+            close=float(h),
+            volume=1,
+            source="live_schwab",
+        )
+        await live.merge_live_bars_day("M", "1m", d, [b], ttl_seconds=3600)
+
+    await asyncio.gather(*[merge_hour(h) for h in range(24)])
+    got = await live.get_live_bars(
+        "M",
+        "1m",
+        datetime(2026, 9, 3, 0, 0, tzinfo=UTC),
+        datetime(2026, 9, 3, 23, 59, tzinfo=UTC),
+    )
+    assert len(got) == 24
+    assert {int(b.close) for b in got} == set(range(24))

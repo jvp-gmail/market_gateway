@@ -146,7 +146,13 @@ curl -N -H "X-API-Key: $MARKET_GATEWAY_API_KEY" \
   "http://localhost:${MARKET_GATEWAY_PORT:-8020}/events/stream"
 ```
 
-Look for `event_type` `equity_quote` and `payload.quote`. Later parts: Schwab stream ingest, Redis live cache updates, optional `option_quote` from the socket.
+Look for `event_type` `equity_quote` and `payload.quote`.
+
+**Part 2 (live Schwab WebSocket):** with `ENABLE_SCHWAB_LIVE_DATA` and a valid token, set `ENABLE_SCHWAB_STREAMING=true` and `SCHWAB_STREAM_EQUITY_SYMBOLS=SPY,QQQ,/ES` (comma-separated). **Futures** must use Schwab’s slash symbols (e.g. **`/ES`**, **`/MES`**) so they go to `LEVELONE_FUTURES`; plain tickers use `LEVELONE_EQUITIES`. Events still use `equity_quote` + `QuoteSnapshot` on the bus (`source` `live_schwab_stream`). Set **`SCHWAB_STREAMING_DEBUG=true`** temporarily to log raw WebSocket JSON from schwab-py (`Send` / `Receive` lines); turn it off afterward. See `docs/phase4_part2_schwab_stream.md`.
+
+If you only see SSE **idle** heartbeats while the Schwab stream is connected: the gateway registers **schwab-py handlers before SUBS** (per library docs, early DATA frames are dropped if no handler exists). If it still idles, enable `logging.getLogger("schwab.streaming").setLevel(logging.DEBUG)` temporarily to inspect raw traffic. Also check gateway logs at **INFO** — you should see `Starting Schwab quote WebSocket` and `Schwab quote stream background task started`. If you see **`ENABLE_SCHWAB_STREAMING is true but Schwab client has no http_client`**, the app fell back to the **stub** Schwab client (fix `ENABLE_SCHWAB_LIVE_DATA`, `SCHWAB_*`, and `SCHWAB_TOKEN_FILE`). If logs show **`RESPONSE frame while reading (skipping)`** in a tight loop, say so (we can tune that path).
+
+Application log lines are prefixed like `INFO:market_gateway.app.main:...` (the `market_gateway` logger is configured so **INFO** is visible even when uvicorn’s `--log-level info` only affects its own loggers).
 
 If `curl` exits with **(18) transfer closed with outstanding read data**, the SSE generator likely hit a Redis error (common: **`EVENT_STREAM_NAME` points at a key that is not a stream** — e.g. a string key from another app). Pick a dedicated name (default `stream:events`) or `DEL` the conflicting key, then restart the gateway. With the current code you should instead receive a **`stream_error`** SSE event describing the failure.
 

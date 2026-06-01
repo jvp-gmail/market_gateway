@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     schwab_token_file: str | None = None
     # Minimum spacing between Schwab HTTP calls (client-side throttle).
     schwab_min_request_interval_seconds: float = 0.12
+    # Phase 4 part 2: Schwab WebSocket LEVELONE_EQUITIES (requires live client + token).
+    enable_schwab_streaming: bool = False
+    schwab_stream_equity_symbols: str = ""
+    schwab_stream_reconnect_seconds: float = 5.0
+    # When true, enables DEBUG on schwab-py’s ``schwab.streaming`` logger (WebSocket send/receive text).
+    schwab_streaming_debug: bool = False
     enable_real_trading: bool = False
     quote_ttl_seconds: int = 3
     option_quote_ttl_seconds: int = 3

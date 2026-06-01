@@ -22,10 +22,41 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+def _configure_market_gateway_logging() -> None:
+    """Make ``market_gateway`` INFO logs visible under uvicorn (root often stays at WARNING)."""
+    lg = logging.getLogger("market_gateway")
+    if lg.handlers:
+        lg.setLevel(logging.INFO)
+        return
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+    lg.addHandler(handler)
+    lg.setLevel(logging.INFO)
+    lg.propagate = False
+
+
+def _configure_schwab_streaming_debug() -> None:
+    """Verbose WebSocket traffic from schwab-py (``Send`` / ``Receive`` JSON). See ``SCHWAB_STREAMING_DEBUG``."""
+    lg = logging.getLogger("schwab.streaming")
+    lg.setLevel(logging.DEBUG)
+    if not lg.handlers:
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+        lg.addHandler(handler)
+    lg.propagate = False
+
+
 def create_app(*, redis_client: Redis | None = None) -> FastAPI:
+    _configure_market_gateway_logging()
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         settings = Settings()
+        if settings.schwab_streaming_debug:
+            _configure_schwab_streaming_debug()
+            log.info("SCHWAB_STREAMING_DEBUG enabled — logging WebSocket frames at DEBUG")
         if redis_client is None:
             # URL query options win over kwargs in redis-py's from_url(); patch pool so
             # socket_timeout can be None (required for XREAD BLOCK used by SSE).
@@ -68,7 +99,38 @@ def create_app(*, redis_client: Redis | None = None) -> FastAPI:
 
             stub_task = asyncio.create_task(run_quote_stream_stub(bus, settings))
 
+        stream_task: asyncio.Task | None = None
+        http = getattr(schwab, "http_client", None)
+        if settings.enable_schwab_streaming and http is None:
+            log.warning(
+                "ENABLE_SCHWAB_STREAMING is true but Schwab client has no http_client — "
+                "quote WebSocket not started. Use ENABLE_SCHWAB_LIVE_DATA plus SCHWAB_CLIENT_ID, "
+                "SCHWAB_CLIENT_SECRET, SCHWAB_TOKEN_FILE so the live client loads (see startup logs)."
+            )
+        if settings.enable_schwab_streaming and http is not None:
+            raw = (settings.schwab_stream_equity_symbols or "").strip()
+            sym_list = [s.strip() for s in raw.split(",") if s.strip()]
+            if sym_list:
+                from market_gateway.schwab.stream_equity_runner import run_schwab_equity_stream
+
+                log.info("Starting Schwab quote WebSocket for symbols: %s", sym_list)
+                stream_task = asyncio.create_task(
+                    run_schwab_equity_stream(http, bus, sym_list, settings)
+                )
+            else:
+                log.warning(
+                    "ENABLE_SCHWAB_STREAMING is true but SCHWAB_STREAM_EQUITY_SYMBOLS is empty "
+                    "or has no symbols after parsing (e.g. comma-only); not starting Schwab quote WebSocket"
+                )
+
         yield
+
+        if stream_task is not None:
+            stream_task.cancel()
+            try:
+                await stream_task
+            except asyncio.CancelledError:
+                pass
 
         if stub_task is not None:
             stub_task.cancel()

@@ -57,6 +57,11 @@ class SchwabPyMarketClient:
     def quote_source_label(self) -> str:
         return "live_schwab"
 
+    @property
+    def http_client(self) -> AsyncClient:
+        """Underlying schwab-py async HTTP client (for ``schwab.streaming.StreamClient``)."""
+        return self._inner
+
     def __init__(self, inner: AsyncClient, settings: Settings) -> None:
         self._inner = inner
         self._settings = settings

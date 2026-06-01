@@ -1,4 +1,4 @@
-"""Background Schwab WebSocket: LEVELONE_EQUITIES / LEVELONE_FUTURES → EventBus (Phase 4 part 2)."""
+"""Background Schwab WebSocket: LEVELONE_EQUITIES / LEVELONE_FUTURES / LEVELONE_OPTIONS → EventBus."""
 
 from __future__ import annotations
 
@@ -9,8 +9,12 @@ from typing import TYPE_CHECKING, Any
 from market_gateway.app.config import Settings
 from market_gateway.app.core.event_bus import EventBus
 from market_gateway.app.core.stream_symbols import StreamSymbolsPayload
-from market_gateway.app.services.quote_stream_publisher import publish_equity_quote
-from market_gateway.schwab.stream_equity_normalize import level_one_equity_row_to_quote_snapshot
+from market_gateway.app.services.quote_stream_publisher import publish_equity_quote, publish_option_quote
+from market_gateway.schwab.option_symbol import schwab_option_symbol
+from market_gateway.schwab.stream_equity_normalize import (
+    level_one_equity_row_to_quote_snapshot,
+    level_one_option_row_to_option_contract_quote,
+)
 
 if TYPE_CHECKING:
     from schwab.client.asynchronous import AsyncClient
@@ -42,7 +46,12 @@ def partition_equity_and_futures_symbols(symbols: list[str]) -> tuple[list[str],
     return equity, futures
 
 
-def _field_sets(StreamClient: type) -> tuple[list[Any], list[Any]]:
+def _stream_option_keys(symbols: list[str]) -> list[str]:
+    """Schwab ``LEVELONE_OPTIONS`` keys use OSI; map gateway underscore ids the same as REST."""
+    return [schwab_option_symbol(s) for s in symbols]
+
+
+def _field_sets(StreamClient: type) -> tuple[list[Any], list[Any], list[Any]]:
     Fe = StreamClient.LevelOneEquityFields
     equity_fields = [
         Fe.SYMBOL,
@@ -67,7 +76,31 @@ def _field_sets(StreamClient: type) -> tuple[list[Any], list[Any]]:
         Ff.TOTAL_VOLUME,
         Ff.QUOTE_TIME_MILLIS,
     ]
-    return equity_fields, fut_fields
+    Fo = StreamClient.LevelOneOptionFields
+    opt_fields = [
+        Fo.SYMBOL,
+        Fo.BID_PRICE,
+        Fo.ASK_PRICE,
+        Fo.LAST_PRICE,
+        Fo.MARK,
+        Fo.BID_SIZE,
+        Fo.ASK_SIZE,
+        Fo.TOTAL_VOLUME,
+        Fo.QUOTE_TIME_MILLIS,
+        Fo.UNDERLYING,
+        Fo.EXPIRATION_YEAR,
+        Fo.EXPIRATION_MONTH,
+        Fo.EXPIRATION_DAY,
+        Fo.CONTRACT_TYPE,
+        Fo.DELTA,
+        Fo.GAMMA,
+        Fo.THETA,
+        Fo.VEGA,
+        Fo.RHO,
+        Fo.VOLATILITY,
+        Fo.OPEN_INTEREST,
+    ]
+    return equity_fields, fut_fields, opt_fields
 
 
 async def _apply_subscription_change(
@@ -76,6 +109,7 @@ async def _apply_subscription_change(
     new: StreamSymbolsPayload,
     equity_fields: list[Any],
     fut_fields: list[Any],
+    opt_fields: list[Any],
 ) -> None:
     """Same WebSocket session: SUBS replaces keys; UNSUBS when clearing a service."""
     if new.equities != old.equities:
@@ -88,8 +122,13 @@ async def _apply_subscription_change(
             await client.level_one_futures_unsubs(old.futures)
         elif new.futures:
             await client.level_one_futures_subs(new.futures, fields=fut_fields)
-    if new.options or old.options:
-        log.warning("LEVELONE_OPTIONS resubscribe not implemented; ignoring options change")
+    if new.options != old.options:
+        old_k = _stream_option_keys(old.options)
+        new_k = _stream_option_keys(new.options)
+        if old_k and not new_k:
+            await client.level_one_option_unsubs(old_k)
+        elif new_k:
+            await client.level_one_option_subs(new_k, fields=opt_fields)
 
 
 async def run_schwab_equity_stream(
@@ -103,14 +142,13 @@ async def run_schwab_equity_stream(
 
     log.info("Schwab quote stream background task started")
 
-    if not initial.equities and not initial.futures:
+    if not initial.equities and not initial.futures and not initial.options:
         log.warning(
-            "Schwab quote stream: no equities or futures in initial payload; exiting "
-            "(options-only streaming not implemented)"
+            "Schwab quote stream: initial payload has no equities, futures, or options; exiting"
         )
         return
 
-    equity_fields, fut_fields = _field_sets(StreamClient)
+    equity_fields, fut_fields, opt_fields = _field_sets(StreamClient)
     backoff = max(3.0, float(settings.schwab_stream_reconnect_seconds))
     current = initial.model_copy()
 
@@ -127,9 +165,14 @@ async def run_schwab_equity_stream(
                     for row in msg.get("content") or []:
                         if not isinstance(row, dict):
                             continue
-                        snap = level_one_equity_row_to_quote_snapshot(row)
-                        if snap:
-                            await publish_equity_quote(bus, snap)
+                        if msg.get("service") == "LEVELONE_OPTIONS":
+                            oc = level_one_option_row_to_option_contract_quote(row)
+                            if oc:
+                                await publish_option_quote(bus, oc)
+                        else:
+                            snap = level_one_equity_row_to_quote_snapshot(row)
+                            if snap:
+                                await publish_equity_quote(bus, snap)
                 except Exception:
                     log.exception("Schwab quote stream handler failed")
                 finally:
@@ -186,15 +229,16 @@ async def run_schwab_equity_stream(
                         log.debug("Schwab stream: resubscribe no-op (unchanged lists)")
                         continue
                     log.info(
-                        "Schwab stream: applying session resubscribe equities=%s futures=%s",
+                        "Schwab stream: applying session resubscribe equities=%s futures=%s options=%s",
                         new_payload.equities or "(none)",
                         new_payload.futures or "(none)",
+                        new_payload.options or "(none)",
                     )
                     old = current.model_copy()
                     current = new_payload.model_copy()
                     try:
                         await _apply_subscription_change(
-                            client, old, new_payload, equity_fields, fut_fields
+                            client, old, new_payload, equity_fields, fut_fields, opt_fields
                         )
                     except Exception:
                         log.exception(
@@ -216,23 +260,30 @@ async def run_schwab_equity_stream(
 
         try:
             log.info(
-                "Schwab stream: login; equities=%s futures=%s",
+                "Schwab stream: login; equities=%s futures=%s options=%s",
                 current.equities or "(none)",
                 current.futures or "(none)",
+                current.options or "(none)",
             )
             await client.login()
             # Handlers must be registered *before* SUBS (schwab-py drops DATA without handlers).
             client.add_level_one_equity_handler(_quote_handler)
             client.add_level_one_futures_handler(_quote_handler)
+            client.add_level_one_option_handler(_quote_handler)
             if current.equities:
                 await client.level_one_equity_subs(current.equities, fields=equity_fields)
             if current.futures:
                 await client.level_one_futures_subs(current.futures, fields=fut_fields)
+            if current.options:
+                await client.level_one_option_subs(
+                    _stream_option_keys(current.options), fields=opt_fields
+                )
             log.info(
                 "Schwab stream: subscriptions active; multiplexed read + resubscribe loop "
-                "(equities=%s futures=%s)",
+                "(equities=%s futures=%s options=%s)",
                 current.equities or "(none)",
                 current.futures or "(none)",
+                current.options or "(none)",
             )
             await _multiplex_loop()
         except asyncio.CancelledError:

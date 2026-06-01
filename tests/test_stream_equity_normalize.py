@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from market_gateway.schwab.stream_equity_normalize import level_one_equity_row_to_quote_snapshot
+from market_gateway.schwab.stream_equity_normalize import (
+    level_one_equity_row_to_quote_snapshot,
+    level_one_option_row_to_option_contract_quote,
+)
 from market_gateway.schwab.stream_equity_runner import partition_equity_and_futures_symbols
 
 
@@ -32,6 +35,27 @@ def test_level_one_equity_row_to_quote_snapshot_minimal() -> None:
     assert q.volume == 1_234_567
     assert q.source == "live_schwab_stream"
     assert q.event_ts == datetime.fromtimestamp(1_700_000_000_000 / 1000.0, tz=UTC)
+
+
+def test_level_one_option_row_to_option_contract_quote() -> None:
+    row = {
+        "key": "SPY   260601C00756000",
+        "BID_PRICE": 1.5,
+        "ASK_PRICE": 1.55,
+        "DELTA": 0.42,
+        "VOLATILITY": 0.22,
+        "QUOTE_TIME_MILLIS": 1_700_000_000_000,
+    }
+    oc = level_one_option_row_to_option_contract_quote(row)
+    assert oc is not None
+    assert oc.option_symbol == "SPY   260601C00756000"
+    assert oc.underlying_symbol == "SPY"
+    assert oc.strike == 756.0
+    assert oc.option_type == "CALL"
+    assert oc.bid == 1.5
+    assert oc.delta == 0.42
+    assert oc.implied_volatility == 0.22
+    assert oc.source == "live_schwab_stream"
 
 
 def test_partition_equity_and_futures_symbols() -> None:

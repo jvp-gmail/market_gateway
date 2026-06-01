@@ -110,7 +110,9 @@ def create_app(*, redis_client: Redis | None = None) -> FastAPI:
         if settings.enable_schwab_streaming and http is not None:
             raw = (settings.schwab_stream_equity_symbols or "").strip()
             sym_list = [s.strip() for s in raw.split(",") if s.strip()]
-            if sym_list:
+            opt_raw = (settings.schwab_stream_options_symbols or "").strip()
+            opt_list = [s.strip() for s in opt_raw.split(",") if s.strip()]
+            if sym_list or opt_list:
                 from market_gateway.app.core.stream_symbols import StreamSymbolsPayload
                 from market_gateway.schwab.stream_equity_runner import (
                     partition_equity_and_futures_symbols,
@@ -118,26 +120,24 @@ def create_app(*, redis_client: Redis | None = None) -> FastAPI:
                 )
 
                 eq_syms, fut_syms = partition_equity_and_futures_symbols(sym_list)
-                if (settings.schwab_stream_options_symbols or "").strip():
-                    log.warning(
-                        "SCHWAB_STREAM_OPTIONS_SYMBOLS is set but LEVELONE_OPTIONS streaming is not "
-                        "implemented yet — ignoring bootstrap options"
-                    )
-                initial = StreamSymbolsPayload(equities=eq_syms, futures=fut_syms, options=[])
+                initial = StreamSymbolsPayload(
+                    equities=eq_syms, futures=fut_syms, options=opt_list
+                )
                 replace_queue: asyncio.Queue[StreamSymbolsPayload] = asyncio.Queue(maxsize=8)
                 app.state.stream_symbol_replace_queue = replace_queue
                 log.info(
-                    "Starting Schwab quote WebSocket (equities=%s futures=%s)",
+                    "Starting Schwab quote WebSocket (equities=%s futures=%s options=%s)",
                     eq_syms or "(none)",
                     fut_syms or "(none)",
+                    initial.options or "(none)",
                 )
                 stream_task = asyncio.create_task(
                     run_schwab_equity_stream(http, bus, settings, replace_queue, initial)
                 )
             else:
                 log.warning(
-                    "ENABLE_SCHWAB_STREAMING is true but SCHWAB_STREAM_EQUITY_SYMBOLS is empty "
-                    "or has no symbols after parsing (e.g. comma-only); not starting Schwab quote WebSocket"
+                    "ENABLE_SCHWAB_STREAMING is true but both SCHWAB_STREAM_EQUITY_SYMBOLS and "
+                    "SCHWAB_STREAM_OPTIONS_SYMBOLS are empty after parsing; not starting Schwab quote WebSocket"
                 )
 
         yield

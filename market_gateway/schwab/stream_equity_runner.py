@@ -17,6 +17,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# One queue entry = one Schwab ``data`` frame (often one service, multiple ``content`` rows).
+# A depth of 1 drops whole frames when another service (e.g. futures) outpaces Redis publish,
+# which starves equities L1 next to chatty ``/ES``.
+_SCHWAB_STREAM_PUBLISH_QUEUE_MAX = 512
+
 
 def _parse_symbols(symbols: list[str]) -> list[str]:
     return sorted({s.strip().upper() for s in symbols if s.strip()})
@@ -111,7 +116,9 @@ async def run_schwab_equity_stream(
 
     while True:
         client = StreamClient(inner, enforce_enums=True)
-        publish_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+        publish_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
+            maxsize=_SCHWAB_STREAM_PUBLISH_QUEUE_MAX
+        )
 
         async def _publish_worker() -> None:
             while True:

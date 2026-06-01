@@ -175,12 +175,6 @@ async def run_schwab_equity_stream(
                                 "Schwab stream: RESPONSE frame while reading (skipping): %s",
                                 getattr(exc, "response", exc),
                             )
-                        except Exception as exc:
-                            log.warning(
-                                "Schwab stream: handle_message failed before resubscribe: %s: %s",
-                                type(exc).__name__,
-                                exc,
-                            )
                     if new_payload == current:
                         log.debug("Schwab stream: resubscribe no-op (unchanged lists)")
                         continue
@@ -211,12 +205,6 @@ async def run_schwab_equity_stream(
                     log.warning(
                         "Schwab stream: RESPONSE frame while reading (skipping): %s",
                         getattr(exc, "response", exc),
-                    )
-                except Exception as exc:
-                    log.warning(
-                        "Schwab stream: handle_message failed: %s: %s",
-                        type(exc).__name__,
-                        exc,
                     )
 
         try:

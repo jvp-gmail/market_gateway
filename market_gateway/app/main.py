@@ -111,11 +111,28 @@ def create_app(*, redis_client: Redis | None = None) -> FastAPI:
             raw = (settings.schwab_stream_equity_symbols or "").strip()
             sym_list = [s.strip() for s in raw.split(",") if s.strip()]
             if sym_list:
-                from market_gateway.schwab.stream_equity_runner import run_schwab_equity_stream
+                from market_gateway.app.core.stream_symbols import StreamSymbolsPayload
+                from market_gateway.schwab.stream_equity_runner import (
+                    partition_equity_and_futures_symbols,
+                    run_schwab_equity_stream,
+                )
 
-                log.info("Starting Schwab quote WebSocket for symbols: %s", sym_list)
+                eq_syms, fut_syms = partition_equity_and_futures_symbols(sym_list)
+                if (settings.schwab_stream_options_symbols or "").strip():
+                    log.warning(
+                        "SCHWAB_STREAM_OPTIONS_SYMBOLS is set but LEVELONE_OPTIONS streaming is not "
+                        "implemented yet — ignoring bootstrap options"
+                    )
+                initial = StreamSymbolsPayload(equities=eq_syms, futures=fut_syms, options=[])
+                replace_queue: asyncio.Queue[StreamSymbolsPayload] = asyncio.Queue(maxsize=8)
+                app.state.stream_symbol_replace_queue = replace_queue
+                log.info(
+                    "Starting Schwab quote WebSocket (equities=%s futures=%s)",
+                    eq_syms or "(none)",
+                    fut_syms or "(none)",
+                )
                 stream_task = asyncio.create_task(
-                    run_schwab_equity_stream(http, bus, sym_list, settings)
+                    run_schwab_equity_stream(http, bus, settings, replace_queue, initial)
                 )
             else:
                 log.warning(

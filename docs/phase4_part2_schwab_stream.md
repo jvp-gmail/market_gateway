@@ -10,6 +10,8 @@ This branch implements **live Schwab WebSocket** (or schwab-py streaming API) in
 4. **Optional LiveCache** — write-through so REST stays aligned with stream (separate follow-up if scope grows).
 5. **Tests** — unit tests with recorded frames or mocks; no network in default CI.
 
+**Session resubscribe:** `PUT /events/stream/symbols` (API key) enqueues a new `{equities, futures, options}` triple; the stream task applies `SUBS` / `UNSUBS` on the **existing** WebSocket (no logout). `options` must stay empty until `LEVELONE_OPTIONS` is wired.
+
 See `README.md` (Phase 4 section) and `docs/market_gateway_spec.md` § Phase 4.
 
 **Troubleshooting wire traffic:** set `SCHWAB_STREAMING_DEBUG=true` in `.env` (or export for one run). Restart the gateway; logs show schwab-py `DEBUG:schwab.streaming:Send …` / `Receive …` with JSON payloads. Disable when finished (noisy and may include market data).

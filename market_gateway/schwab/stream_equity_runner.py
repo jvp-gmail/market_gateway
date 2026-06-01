@@ -144,33 +144,59 @@ async def run_schwab_equity_stream(
             except asyncio.QueueFull:
                 log.debug("Schwab quote stream publish queue full; dropping payload")
 
-        async def _reader_loop() -> None:
+        async def _multiplex_loop() -> None:
+            """Never run ``handle_message`` concurrently with SUBS/UNSUBS (same WebSocket ``recv``)."""
+            nonlocal current
             while True:
+                read_task = asyncio.create_task(client.handle_message())
+                ctrl_task = asyncio.create_task(replace_queue.get())
                 try:
-                    await client.handle_message()
+                    done, _ = await asyncio.wait(
+                        {read_task, ctrl_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                except asyncio.CancelledError:
+                    read_task.cancel()
+                    ctrl_task.cancel()
+                    await asyncio.gather(read_task, ctrl_task, return_exceptions=True)
+                    raise
+
+                if ctrl_task in done:
+                    if read_task not in done:
+                        read_task.cancel()
+                        await asyncio.gather(read_task, return_exceptions=True)
+                    else:
+                        try:
+                            read_task.result()
+                        except UnexpectedResponse as exc:
+                            log.warning(
+                                "Schwab stream: RESPONSE frame while reading (skipping): %s",
+                                getattr(exc, "response", exc),
+                            )
+                    new_payload = ctrl_task.result()
+                    if new_payload == current:
+                        log.debug("Schwab stream: resubscribe no-op (unchanged lists)")
+                        continue
+                    log.info(
+                        "Schwab stream: applying session resubscribe equities=%s futures=%s",
+                        new_payload.equities or "(none)",
+                        new_payload.futures or "(none)",
+                    )
+                    await _apply_subscription_change(
+                        client, current, new_payload, equity_fields, fut_fields
+                    )
+                    current = new_payload.model_copy()
+                    continue
+
+                ctrl_task.cancel()
+                await asyncio.gather(ctrl_task, return_exceptions=True)
+                try:
+                    read_task.result()
                 except UnexpectedResponse as exc:
                     log.warning(
                         "Schwab stream: RESPONSE frame while reading (skipping): %s",
                         getattr(exc, "response", exc),
                     )
-                    continue
-
-        async def _control_loop() -> None:
-            nonlocal current
-            while True:
-                new_payload = await replace_queue.get()
-                if new_payload == current:
-                    log.debug("Schwab stream: resubscribe no-op (unchanged lists)")
-                    continue
-                log.info(
-                    "Schwab stream: applying session resubscribe equities=%s futures=%s",
-                    new_payload.equities or "(none)",
-                    new_payload.futures or "(none)",
-                )
-                await _apply_subscription_change(
-                    client, current, new_payload, equity_fields, fut_fields
-                )
-                current = new_payload.model_copy()
 
         try:
             log.info(
@@ -187,19 +213,12 @@ async def run_schwab_equity_stream(
             if current.futures:
                 await client.level_one_futures_subs(current.futures, fields=fut_fields)
             log.info(
-                "Schwab stream: subscriptions active; reader + resubscribe control running "
+                "Schwab stream: subscriptions active; multiplexed read + resubscribe loop "
                 "(equities=%s futures=%s)",
                 current.equities or "(none)",
                 current.futures or "(none)",
             )
-            reader_task = asyncio.create_task(_reader_loop())
-            control_task = asyncio.create_task(_control_loop())
-            try:
-                await asyncio.gather(reader_task, control_task)
-            finally:
-                for t in (reader_task, control_task):
-                    t.cancel()
-                await asyncio.gather(reader_task, control_task, return_exceptions=True)
+            await _multiplex_loop()
         except asyncio.CancelledError:
             log.info("Schwab quote stream cancelled")
             raise

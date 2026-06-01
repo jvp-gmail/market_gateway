@@ -162,6 +162,8 @@ async def run_schwab_equity_stream(
                     raise
 
                 if ctrl_task in done:
+                    # Always consume the queue payload first so a failing handle_message cannot drop it.
+                    new_payload = ctrl_task.result()
                     if read_task not in done:
                         read_task.cancel()
                         await asyncio.gather(read_task, return_exceptions=True)
@@ -173,7 +175,12 @@ async def run_schwab_equity_stream(
                                 "Schwab stream: RESPONSE frame while reading (skipping): %s",
                                 getattr(exc, "response", exc),
                             )
-                    new_payload = ctrl_task.result()
+                        except Exception as exc:
+                            log.warning(
+                                "Schwab stream: handle_message failed before resubscribe: %s: %s",
+                                type(exc).__name__,
+                                exc,
+                            )
                     if new_payload == current:
                         log.debug("Schwab stream: resubscribe no-op (unchanged lists)")
                         continue
@@ -182,10 +189,18 @@ async def run_schwab_equity_stream(
                         new_payload.equities or "(none)",
                         new_payload.futures or "(none)",
                     )
-                    await _apply_subscription_change(
-                        client, current, new_payload, equity_fields, fut_fields
-                    )
+                    old = current.model_copy()
                     current = new_payload.model_copy()
+                    try:
+                        await _apply_subscription_change(
+                            client, old, new_payload, equity_fields, fut_fields
+                        )
+                    except Exception:
+                        log.exception(
+                            "Schwab stream: subscription apply failed (local intent already updated; "
+                            "will retry on reconnect)"
+                        )
+                        raise
                     continue
 
                 ctrl_task.cancel()
@@ -196,6 +211,12 @@ async def run_schwab_equity_stream(
                     log.warning(
                         "Schwab stream: RESPONSE frame while reading (skipping): %s",
                         getattr(exc, "response", exc),
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "Schwab stream: handle_message failed: %s: %s",
+                        type(exc).__name__,
+                        exc,
                     )
 
         try:

@@ -109,18 +109,18 @@ def create_app(*, redis_client: Redis | None = None) -> FastAPI:
             )
         if settings.enable_schwab_streaming and http is not None:
             raw = (settings.schwab_stream_equity_symbols or "").strip()
-            if raw:
+            sym_list = [s.strip() for s in raw.split(",") if s.strip()]
+            if sym_list:
                 from market_gateway.schwab.stream_equity_runner import run_schwab_equity_stream
 
-                sym_list = [s.strip() for s in raw.split(",") if s.strip()]
                 log.info("Starting Schwab quote WebSocket for symbols: %s", sym_list)
                 stream_task = asyncio.create_task(
                     run_schwab_equity_stream(http, bus, sym_list, settings)
                 )
             else:
                 log.warning(
-                    "ENABLE_SCHWAB_STREAMING is true but SCHWAB_STREAM_EQUITY_SYMBOLS is empty; "
-                    "not starting Schwab equity WebSocket"
+                    "ENABLE_SCHWAB_STREAMING is true but SCHWAB_STREAM_EQUITY_SYMBOLS is empty "
+                    "or has no symbols after parsing (e.g. comma-only); not starting Schwab quote WebSocket"
                 )
 
         yield

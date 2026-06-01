@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # Phase 4 part 2: Schwab WebSocket LEVELONE_EQUITIES (requires live client + token).
     enable_schwab_streaming: bool = False
     schwab_stream_equity_symbols: str = ""
-    # Reserved for LEVELONE_OPTIONS bootstrap (ignored until option stream is implemented).
+    # Comma-separated option symbols (Schwab OSI or gateway underscore ids) for LEVELONE_OPTIONS bootstrap.
     schwab_stream_options_symbols: str = ""
     schwab_stream_reconnect_seconds: float = 5.0
     # When true, enables DEBUG on schwab-py’s ``schwab.streaming`` logger (WebSocket send/receive text).

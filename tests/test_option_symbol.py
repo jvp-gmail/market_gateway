@@ -1,6 +1,7 @@
 from market_gateway.schwab.option_symbol import (
     gateway_option_symbol,
     is_option_contract_symbol,
+    parse_osi_option_contract,
     schwab_option_symbol,
 )
 
@@ -27,6 +28,20 @@ def test_is_option_contract_symbol_osi_and_gateway() -> None:
     assert is_option_contract_symbol("SPY   260601C00756000")
     assert not is_option_contract_symbol("SPY")
     assert not is_option_contract_symbol("SPY_20260601C0075600")
+
+
+def test_parse_osi_option_contract_spy_call() -> None:
+    out = parse_osi_option_contract("SPY   260601C00756000")
+    assert out is not None
+    u, exp, cp, strike = out
+    assert u == "SPY"
+    assert exp.isoformat() == "2026-06-01"
+    assert cp == "CALL"
+    assert strike == 756.0
+
+
+def test_parse_osi_option_contract_invalid() -> None:
+    assert parse_osi_option_contract("SPY") is None
 
 
 def test_gateway_option_symbol_roundtrip() -> None:

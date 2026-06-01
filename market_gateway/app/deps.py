@@ -32,6 +32,6 @@ def get_stream_symbol_replace_queue(request: Request) -> asyncio.Queue[StreamSym
     if q is None:
         raise HTTPException(
             status_code=503,
-            detail="Schwab quote stream is not active (enable streaming and non-empty symbols).",
+            detail="Schwab quote stream is not active (enable streaming and non-empty SCHWAB_STREAM_* symbol lists).",
         )
     return q

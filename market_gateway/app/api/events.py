@@ -63,17 +63,12 @@ async def put_stream_symbols(
     body: StreamSymbolsPayload,
     replace_queue: asyncio.Queue[StreamSymbolsPayload] = Depends(get_stream_symbol_replace_queue),
 ) -> StreamSymbolsPayload:
-    """Replace Schwab LEVELONE equity/futures keys on the existing WebSocket session (no reconnect)."""
+    """Replace Schwab LEVELONE equity/futures/option keys on the existing WebSocket session (no reconnect)."""
     _ = request
-    if body.options:
-        raise HTTPException(
-            status_code=501,
-            detail="LEVELONE_OPTIONS streaming is not implemented yet; send an empty options list.",
-        )
-    if not body.equities and not body.futures:
+    if not body.equities and not body.futures and not body.options:
         raise HTTPException(
             status_code=400,
-            detail="At least one of equities or futures must be non-empty (options-only is not supported yet).",
+            detail="At least one of equities, futures, or options must be non-empty.",
         )
     await replace_queue.put(body.model_copy())
     return body

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from datetime import date
+from typing import Literal
 
 # Gateway / DB style: SPY_20260601C00756000 (YYYYMMDD + C/P + strike*1000 as 8 digits)
 _GATEWAY_UNDERSCORE = re.compile(r"^([^_]+)_(\d{8})([CPcp])(\d{8})$")
@@ -30,6 +32,27 @@ def gateway_option_symbol(option_symbol: str) -> str:
     root = root6.strip().upper()
     ymd = f"20{yymmdd[0:2]}{yymmdd[2:4]}{yymmdd[4:6]}"
     return f"{root}_{ymd}{cp}{strike8}"
+
+
+def parse_osi_option_contract(
+    symbol: str,
+) -> tuple[str, date, Literal["CALL", "PUT"], float] | None:
+    """Parse Schwab OCC-style option id (6-char root + YYMMDD + C/P + strike×1000, 8 digits).
+
+    Returns ``(underlying, expiration, call_put, strike)`` or ``None`` if the string
+    does not match the OSI pattern.
+    """
+    s = symbol.strip().upper()
+    m = _OSI_CONTRACT.match(s)
+    if not m:
+        return None
+    root6, yymmdd, cp, strike8 = m.group(1), m.group(2), m.group(3).upper(), m.group(4)
+    root = root6.strip().upper()
+    ymd = f"20{yymmdd[0:2]}{yymmdd[2:4]}{yymmdd[4:6]}"
+    exp = date(int(ymd[0:4]), int(ymd[4:6]), int(ymd[6:8]))
+    opt_type: Literal["CALL", "PUT"] = "CALL" if cp == "C" else "PUT"
+    strike = int(strike8) / 1000.0
+    return (root, exp, opt_type, strike)
 
 
 def schwab_option_symbol(option_symbol: str) -> str:

@@ -79,11 +79,11 @@ async def run_schwab_equity_stream(
 
     while True:
         client = StreamClient(inner, enforce_enums=True)
+        publish_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
 
-        def _quote_handler(msg: dict[str, Any]) -> None:
-            """Sync handler: schwab-py ``ensure_future`` swallows async handler errors."""
-
-            async def _work() -> None:
+        async def _publish_worker() -> None:
+            while True:
+                msg = await publish_queue.get()
                 try:
                     for row in msg.get("content") or []:
                         if not isinstance(row, dict):
@@ -93,21 +93,24 @@ async def run_schwab_equity_stream(
                             await publish_equity_quote(bus, snap)
                 except Exception:
                     log.exception("Schwab quote stream handler failed")
+                finally:
+                    publish_queue.task_done()
 
-            task = asyncio.create_task(_work())
+        worker_task = asyncio.create_task(_publish_worker())
 
-            def _done(t: asyncio.Task[Any]) -> None:
-                if t.cancelled():
-                    return
-                exc = t.exception()
-                if exc is not None:
-                    log.error(
-                        "Schwab quote stream publish task failed: %s: %s",
-                        type(exc).__name__,
-                        exc,
-                    )
+        def _quote_handler(msg: dict[str, Any]) -> None:
+            """Sync handler: keep Redis publishes on one bounded worker."""
 
-            task.add_done_callback(_done)
+            if publish_queue.full():
+                try:
+                    publish_queue.get_nowait()
+                    publish_queue.task_done()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                publish_queue.put_nowait(msg)
+            except asyncio.QueueFull:
+                log.debug("Schwab quote stream publish queue full; dropping payload")
 
         try:
             log.info(
@@ -152,6 +155,11 @@ async def run_schwab_equity_stream(
                 backoff,
             )
         finally:
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
             try:
                 await client.logout()
             except Exception:

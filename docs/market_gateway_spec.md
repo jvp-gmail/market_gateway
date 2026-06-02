@@ -507,8 +507,8 @@ GET /history/{symbol}?timeframe=1d&lookback_days=365&mode=historical_only
 
 Preferred normalized parameters:
 
-- `symbol`: path parameter
-- `timeframe`: `1m`, `5m`, `15m`, `1h`, `1d`, etc.
+- `symbol`: path parameter — equities use plain tickers (e.g. `SPY`); options accept gateway underscore ids or Schwab OSI (see **Option Quotes**).
+- `timeframe`: **implemented today:** equities **`1m`** and **`1d`** from Postgres (`stocks_1_minute`, `stocks_1_day`); options **`1m` only** from Postgres (`options_1_minute`). Any other `timeframe` returns **no canonical rows** from the historical store (empty historical segment); the resolver does **not** aggregate finer bars into coarser intervals in the gateway (clients may aggregate `1m`, e.g. strategy-side).
 - `start`: optional ISO datetime
 - `end`: optional ISO datetime, default now
 - `lookback_days`: optional integer if start omitted
@@ -522,16 +522,15 @@ historical_only:
     Suitable for formal backtesting and repeatable research.
 
 live_only:
-    Use only Schwab/Redis/live cache data.
-    Suitable for current session monitoring and shadow testing.
+    Use only the live path: Redis `history_live:*` blobs for the requested window, with Schwab `get_price_history` backfill when coverage is incomplete.
+    Implemented for **equity** bars with **`timeframe` `1m` or `1d`** only (requires `ENABLE_SCHWAB_LIVE_DATA` and live client for Schwab fills). Option contracts: **no** Schwab bar backfill in this path — expect empty or Redis-only if populated elsewhere.
 
 canonical_plus_live:
-    Use canonical history through the last finalized timestamp, then live cache for current session.
-    Suitable for charts and indicators requiring lookback plus today's action.
+    Use canonical TimescaleDB history through the **last finalized timestamp** for the symbol and timeframe, then merge the **live** segment (Redis + Schwab backfill as below). **Canonical wins** on duplicate timestamps.
+    **Equity `1m` / `1d`:** live segment after `lf` uses `_live_bars_for_window`, which may call Schwab `get_price_history` for `1m` or `1d` and merge into Redis. **Equity `1d`:** the live window starts at **`lf + 1 calendar day`** (UTC) so the last canonical day does not collide with the first live daily bar. **Option `1m`:** historical rows from `options_1_minute` only; there is **no** Schwab price-history merge for option **bars** past canonical data (option **quotes** use `/options/quotes` separately).
 
 best_available:
-    Convenience mode. May use any available source.
-    Good for display, but not recommended for formal backtests.
+    For `GET /history/{symbol}`, follows the **same merge rules** as `canonical_plus_live` (including sample-tail behavior when live Schwab returns no candles in those modes). Prefer documenting client expectations against `canonical_plus_live` unless `best_available` semantics diverge in code later.
 ```
 
 Example SPY request:
@@ -540,18 +539,16 @@ Example SPY request:
 GET /history/SPY?timeframe=1m&lookback_days=30&mode=canonical_plus_live
 ```
 
-Expected resolver behavior:
+Expected resolver behavior (equity `1m` / `1d`, option `1m`; see **timeframe** above):
 
 ```text
-1. Determine requested time range.
-2. Determine last finalized historical timestamp for SPY/timeframe.
-3. Query TimescaleDB for canonical bars from start through finalized history.
-4. Query Redis/live cache for current-day/session bars after the finalized point.
-5. Normalize columns.
-6. Concatenate.
-7. Sort by timestamp.
-8. Remove duplicates.
-9. Add source labels.
+1. Determine requested time range [start, end] (defaults apply when omitted).
+2. Load `last_finalized` (`lf`) from Postgres when the symbol/timeframe pair is supported (`max(time)` for 1m tables, `max(date)` for equity 1d); otherwise `lf` is absent and the historical segment is whatever the store returns (often empty for unsupported timeframes).
+3. Query TimescaleDB for canonical bars on the overlap of [start, end] with the historical portion (through `min(end, lf)` when `lf` exists).
+4. For `live_only`, or for the live tail in `canonical_plus_live` / `best_available`: read Redis `history_live:*` for the live window; for **equities** with `timeframe` **`1m` or `1d`**, if coverage is incomplete and live Schwab is enabled, fetch Schwab price history into Redis (see `DataResolver._live_bars_for_window`). **Option `1m`:** this step does **not** call Schwab for OHLCV bars — do not expect a Schwab-filled tail past canonical option 1m data.
+5. Merge historical and live (`merge_bars_by_preference`): canonical / historical timestamp wins over live on duplicates.
+6. When `lf` exists: optionally append deterministic **sample** tail (`canonical_plus_live` / `best_available` only) if the live segment is empty and `_append_sample_tail_when_live_empty` applies (not when live Schwab is active but returned no candles — that path logs and skips sample). When `lf` is absent, the implementation merges full-window historical + live **without** this sample-tail step. See README for `1d` behavior.
+7. Sort by timestamp, attach `source` on bars (`historical`, `live_schwab`, `sample`, etc.).
 ```
 
 Returned bars should optionally include `source`:
@@ -785,15 +782,15 @@ class DataResolver:
         ...
 ```
 
-Source precedence rules:
+Source precedence rules (bars / `get_bars`):
 
 ```text
-1. In historical_only mode, use only canonical TimescaleDB data.
-2. In live_only mode, use only Redis/live Schwab data.
-3. In canonical_plus_live mode, use canonical history through the last finalized historical timestamp and live cache after that.
-4. In best_available mode, use whatever source can satisfy the request, but include source labels.
-5. Canonical historical data wins over live cache for completed periods.
-6. Live cache only fills the gap after the last finalized historical timestamp unless explicitly requested.
+1. historical_only: TimescaleDB only via HistoricalStore (equity `1m`/`1d`, option `1m` as implemented); no Redis, no Schwab price history.
+2. live_only: Redis `history_live:*` for the window; Schwab `get_price_history` backfill only for **equities** with timeframe **`1m` or `1d`** when live data is enabled and coverage is incomplete (options: no Schwab bar backfill).
+3. canonical_plus_live: historical through `lf` (or full-window historical when `lf` is absent), plus live window as in (2); merge with canonical winning on duplicate timestamps; sample-tail helper only on the branch where `lf` is present (see Historical / Bar Data step 6).
+4. best_available: **same** bar merge and live/Schwab rules as `canonical_plus_live` in the current implementation; source labels on bars still apply.
+5. On duplicate timestamps after merge, canonical / historical rows overwrite live.
+6. The live segment starts after `lf` (or after `lf + 1` UTC calendar day for equity `1d`), not mid-canonical day, except when `lf` is absent and the full range is merged from historical + live.
 ```
 
 The resolver should be heavily tested.
@@ -1175,7 +1172,7 @@ Phase 1 tests:
 Phase 2 tests:
 
 - `historical_only` uses only HistoricalStore.
-- `live_only` uses only LiveCache.
+- `live_only` uses the live path (Redis `history_live:*`); for **equity** `1m` / `1d`, incomplete coverage may trigger Schwab `get_price_history` backfill when live data is enabled (options: no Schwab bar backfill).
 - `canonical_plus_live` stitches historical + live data correctly.
 - canonical bars win over live bars on overlap.
 - duplicate timestamps are removed or resolved consistently.

@@ -54,7 +54,12 @@ def _parse_parts(symbol: str) -> tuple[str, str, Literal["C", "P"], str] | None:
             return None
         yymmdd = ymd8[2:4] + ymd8[4:6] + ymd8[6:8]
         rt = root.strip().upper()
-        if not rt or len(rt) > 6 or cp not in ("C", "P"):
+        if (
+            not rt
+            or len(rt) > _MAX_COMPACT_OPTION_ROOT_LEN
+            or _OPTION_ROOT_COMPACT.fullmatch(rt) is None
+            or cp not in ("C", "P")
+        ):
             return None
         if not strike8.isdigit() or len(strike8) != 8:
             return None

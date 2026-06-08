@@ -27,6 +27,9 @@ def test_schwab_passthrough_strips_whitespace() -> None:
 
 
 def test_is_option_contract_symbol() -> None:
+    # Legacy underscore + YYYYMMDD must accept roots longer than six (same as compact OSI).
+    assert is_option_contract_symbol("ABCDEFG_20260601C00756000")
+    assert normalize_option_to_compact("ABCDEFG_20260601C00756000") == "ABCDEFG260601C00756000"
     assert is_option_contract_symbol("SPY_20260601C00756000")
     assert is_option_contract_symbol("SPY   260601C00756000")
     assert is_option_contract_symbol("SPY260601C00756000")

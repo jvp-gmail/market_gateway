@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from market_gateway.app.core.models import OptionContractQuote, QuoteSnapshot
 from market_gateway.app.core.time_utils import utc_now
-from market_gateway.schwab.option_symbol import parse_osi_option_contract, schwab_option_symbol
+from market_gateway.schwab.option_symbol import gateway_option_symbol, parse_osi_option_contract
 
 
 def _quote_time_ms_to_dt(ms: Any) -> datetime | None:
@@ -87,8 +87,8 @@ def level_one_option_row_to_option_contract_quote(row: dict[str, Any]) -> Option
     raw_sym = _row_symbol(row)
     if not raw_sym:
         return None
-    osi = schwab_option_symbol(raw_sym)
-    parsed = parse_osi_option_contract(osi)
+    compact = gateway_option_symbol(raw_sym)
+    parsed = parse_osi_option_contract(compact)
     underlying_raw = row.get("UNDERLYING")
     underlying: str | None = None
     if underlying_raw is not None and str(underlying_raw).strip():
@@ -108,7 +108,7 @@ def level_one_option_row_to_option_contract_quote(row: dict[str, Any]) -> Option
     now = utc_now()
     event_ts = _quote_time_ms_to_dt(row.get("QUOTE_TIME_MILLIS"))
     return OptionContractQuote(
-        option_symbol=osi,
+        option_symbol=compact,
         underlying_symbol=underlying,
         expiration=exp,
         strike=strike,

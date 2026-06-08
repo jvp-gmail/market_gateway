@@ -485,11 +485,13 @@ Behavior:
 ## Option Quotes
 
 ```text
-GET /options/quotes?symbols=AAPL_20260619C00200000,AAPL_20260619P00195000
+GET /options/quotes?symbols=AAPL260619C00200000,AAPL260619P00195000
 GET /options/quotes?symbols=AAPL  260619C00200000
 ```
 
-**Symbol forms:** Clients may pass either (1) **gateway / DB style** `ROOT_YYYYMMDD{C|P}strike8` (strike × 1000, eight digits, e.g. `SPY_20260601C00756000`), or (2) **Schwab OSI** form: underlying padded on the **right with spaces to six characters**, then **YYMMDD**, **C** or **P**, then the same eight-digit strike field (e.g. `SPY   260601C00756000`). The resolver normalizes (1) to (2) before cache lookup and Schwab `GET /marketdata/v1/quotes`. Responses use the **canonical OSI** string in `option_symbol`.
+**Symbol forms:** Clients may pass (1) **compact OSI** — `ROOT` + `YYMMDD` + `C`/`P` + eight-digit strike×1000 (e.g. `SPY260601C00756000`), (2) legacy **underscore + YYYYMMDD** `ROOT_YYYYMMDD{C|P}strike8` (e.g. `SPY_20260601C00756000`), (3) **Polygon wire** `O:` + compact, or (4) **Schwab padded OSI** (six-character root with trailing spaces, then `YYMMDD`, `C`/`P`, strike eight digits, e.g. `SPY   260601C00756000`). The resolver normalizes to **compact** for Redis and JSON responses; Schwab calls use padded OSI derived from the same contract.
+
+Responses use **compact OSI** in `option_symbol` (aligned with Postgres `options_1_minute.option_symbol` and `polygon_ticker` style keys without the `O:` prefix).
 
 Behavior:
 
@@ -507,7 +509,7 @@ GET /history/{symbol}?timeframe=1d&lookback_days=365&mode=historical_only
 
 Preferred normalized parameters:
 
-- `symbol`: path parameter — equities use plain tickers (e.g. `SPY`); options accept gateway underscore ids or Schwab OSI (see **Option Quotes**).
+- `symbol`: path parameter — equities use plain tickers (e.g. `SPY`); options accept **compact OSI**, legacy underscore ids, `O:` + compact, or Schwab padded OSI (see **Option Quotes**).
 - `timeframe`: **implemented today:** equities **`1m`** and **`1d`** from Postgres (`stocks_1_minute`, `stocks_1_day`); options **`1m` only** from Postgres (`options_1_minute`). Any other `timeframe` returns **no canonical rows** from the historical store (empty historical segment); the resolver does **not** aggregate finer bars into coarser intervals in the gateway (clients may aggregate `1m`, e.g. strategy-side).
 - `start`: optional ISO datetime
 - `end`: optional ISO datetime, default now

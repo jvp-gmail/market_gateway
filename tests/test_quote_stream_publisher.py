@@ -41,7 +41,7 @@ async def test_publish_option_quote_round_trip() -> None:
     bus = EventBus(fake, "stream:qsp_opt", xread_block_ms=10)
     now = utc_now()
     oc = OptionContractQuote(
-        option_symbol="SPY_20260619C00400000",
+        option_symbol="SPY260619C00400000",
         underlying_symbol="SPY",
         expiration=date(2026, 6, 19),
         strike=400.0,
@@ -58,5 +58,5 @@ async def test_publish_option_quote_round_trip() -> None:
     assert len(recent) == 1
     assert recent[0].event_type == StreamEventType.OPTION_QUOTE
     q = recent[0].payload["quote"]
-    assert q["option_symbol"] == "SPY_20260619C00400000"
+    assert q["option_symbol"] == "SPY260619C00400000"
     assert q["delta"] == 0.5

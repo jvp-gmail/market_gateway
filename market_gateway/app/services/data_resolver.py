@@ -47,7 +47,7 @@ def merge_bars_by_preference(historical: list[Any], live: list[Any]) -> list[Any
 
 
 def _option_bars_as_client_symbol(raw_sym: str, sym_key: str, bars: list[Any]) -> list[Any]:
-    """Align each bar's ``symbol`` with the option id the client sent (e.g. OSI vs gateway underscore)."""
+    """Align each bar's ``symbol`` with the option id the client sent (e.g. ``O:`` vs compact)."""
     if not bars or raw_sym == sym_key:
         return bars
     return [b.model_copy(update={"symbol": raw_sym}) for b in bars]
@@ -255,19 +255,20 @@ class DataResolver:
         return snap
 
     async def get_option_quote(self, option_symbol: str) -> OptionContractQuote:
-        osi = schwab_option_symbol(option_symbol)
-        cached = await self._live.get_option_quote(osi)
+        compact = gateway_option_symbol(option_symbol)
+        osi = schwab_option_symbol(compact)
+        cached = await self._live.get_option_quote(compact)
         if cached:
             return cached
 
         raw = await self._schwab.get_option_quotes([osi])
         quotes = raw.get("quotes") or {}
-        q = quotes.get(osi) or quotes.get(option_symbol.strip()) or {}
+        q = quotes.get(osi) or quotes.get(compact) or quotes.get(option_symbol.strip()) or {}
         now = utc_now()
         exp_raw = q.get("expiration")
         exp: date | None = exp_raw if isinstance(exp_raw, date) else None
         oc = OptionContractQuote(
-            option_symbol=osi,
+            option_symbol=compact,
             underlying_symbol=q.get("underlying_symbol"),
             expiration=exp,
             strike=float(q["strike"]) if q.get("strike") is not None else None,
@@ -319,9 +320,11 @@ class DataResolver:
                     exp = date.fromisoformat(str(exp_raw)[:10])
                 except ValueError:
                     exp = None
+            sym_raw = str(c.get("symbol", ""))
+            sym_out = gateway_option_symbol(sym_raw) if sym_raw.strip() else ""
             contracts.append(
                 OptionContractQuote(
-                    option_symbol=str(c.get("symbol", "")),
+                    option_symbol=sym_out,
                     underlying_symbol=c.get("underlying"),
                     expiration=exp,
                     strike=float(c["strike"]) if c.get("strike") is not None else None,

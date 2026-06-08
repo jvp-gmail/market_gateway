@@ -10,7 +10,7 @@ This branch implements **live Schwab WebSocket** (or schwab-py streaming API) in
 4. **Optional LiveCache** — write-through so REST stays aligned with stream (separate follow-up if scope grows).
 5. **Tests** — unit tests with recorded frames or mocks; no network in default CI.
 
-**Session resubscribe:** `PUT /events/stream/symbols` (API key) enqueues a new `{equities, futures, options}` triple; the stream task applies `SUBS` / `UNSUBS` on the **existing** WebSocket (no logout). Option symbols may be Schwab OSI or gateway underscore ids (same normalization as REST). `LEVELONE_OPTIONS` rows are published as `option_quote` events (`OptionContractQuote`, `source` `live_schwab_stream`).
+**Session resubscribe:** `PUT /events/stream/symbols` (API key) enqueues a new `{equities, futures, options}` triple; the stream task applies `SUBS` / `UNSUBS` on the **existing** WebSocket (no logout). Option symbols may be **compact OSI**, legacy underscore ids, `O:` + compact, or Schwab padded OSI (same normalization as REST). `LEVELONE_OPTIONS` rows are published as `option_quote` events (`OptionContractQuote`, `source` `live_schwab_stream`).
 
 See `README.md` (Phase 4 section) and `docs/market_gateway_spec.md` § Phase 4.
 

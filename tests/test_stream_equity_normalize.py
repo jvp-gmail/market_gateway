@@ -48,7 +48,7 @@ def test_level_one_option_row_to_option_contract_quote() -> None:
     }
     oc = level_one_option_row_to_option_contract_quote(row)
     assert oc is not None
-    assert oc.option_symbol == "SPY   260601C00756000"
+    assert oc.option_symbol == "SPY260601C00756000"
     assert oc.underlying_symbol == "SPY"
     assert oc.strike == 756.0
     assert oc.option_type == "CALL"

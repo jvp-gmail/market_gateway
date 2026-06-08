@@ -89,8 +89,8 @@ class _RecordingOptionHistorical(_MockHistorical):
 
 
 @pytest.mark.asyncio
-async def test_historical_only_osi_symbol_maps_to_gateway_option_key() -> None:
-    """Quotes return OSI; /history must query options using underscore DB keys."""
+async def test_historical_only_osi_symbol_maps_to_compact_db_key() -> None:
+    """Client may send padded OSI; Postgres option bars are keyed by compact OSI."""
     mh = _RecordingOptionHistorical()
     fake = FakeRedis(decode_responses=True)
     live = LiveCache(fake)
@@ -101,11 +101,11 @@ async def test_historical_only_osi_symbol_maps_to_gateway_option_key() -> None:
     end = datetime(2026, 5, 10, 15, 0, tzinfo=UTC)
     out = await r.get_bars(osi, "1m", start=start, end=end, mode=DataMode.HISTORICAL_ONLY)
     assert out.symbol == osi
-    assert mh.option_keys == ["SPY_20260601C00756000"]
+    assert mh.option_keys == ["SPY260601C00756000"]
 
 
 class _MockHistoricalOptionBarsWithGatewaySymbol(_MockHistorical):
-    """Returns option bars tagged with the DB/gateway key (underscore form)."""
+    """Returns option bars keyed by compact ``option_symbol`` (same as Postgres)."""
 
     async def get_option_bars(
         self, option_symbol: str, timeframe: str, start: datetime, end: datetime

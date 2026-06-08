@@ -111,7 +111,7 @@ curl -s -H "X-API-Key: $MARKET_GATEWAY_API_KEY" \
 
 # Option quote: gateway id `ROOT_YYYYMMDD{C|P}strike8` is normalized to Schwab OSI (6-char root + spaces)
 curl -s -H "X-API-Key: $MARKET_GATEWAY_API_KEY" \
-  "http://localhost:${MARKET_GATEWAY_PORT}/options/quotes?symbols=SPY_20260601C00756000"
+  "http://localhost:${MARKET_GATEWAY_PORT}/options/quotes?symbols=SPY260601C00756000"
 # SPY daily bars: canonical through last `stocks_1_day` date, then Schwab (live) or sample tail (stub / live off)
 curl -s -H "X-API-Key: $MARKET_GATEWAY_API_KEY" \
   "http://localhost:${MARKET_GATEWAY_PORT}/history/SPY?timeframe=1d&lookback_days=14&mode=canonical_plus_live"
@@ -148,7 +148,7 @@ curl -N -H "X-API-Key: $MARKET_GATEWAY_API_KEY" \
 
 Look for `event_type` `equity_quote` and `payload.quote`.
 
-**Part 2 (live Schwab WebSocket):** with `ENABLE_SCHWAB_LIVE_DATA` and a valid token, set `ENABLE_SCHWAB_STREAMING=true` and `SCHWAB_STREAM_EQUITY_SYMBOLS=SPY,QQQ,/ES` (comma-separated). **Futures** must use Schwab’s slash symbols (e.g. **`/ES`**, **`/MES`**) so they go to `LEVELONE_FUTURES`; plain tickers use `LEVELONE_EQUITIES`. **Indexes and NYSE internals** use Schwab’s **`$`-prefixed** keys on that same equities service—for example **`$SPX`** and **`$TICK`** in `SCHWAB_STREAM_EQUITY_SYMBOLS` or in `PUT /events/stream/symbols` → `equities` (not bare `SPX` / `TICK`). **Options:** set `SCHWAB_STREAM_OPTIONS_SYMBOLS` to a comma list of Schwab OSI strings or gateway underscore ids (same as `/options/quotes`); those contracts stream on `LEVELONE_OPTIONS` and emit **`option_quote`** + `OptionContractQuote` (`source` `live_schwab_stream`). Equities and futures still emit **`equity_quote`** + `QuoteSnapshot`. Set **`SCHWAB_STREAMING_DEBUG=true`** temporarily to log raw WebSocket JSON from schwab-py (`Send` / `Receive` lines); turn it off afterward. See `docs/phase4_part2_schwab_stream.md`.
+**Part 2 (live Schwab WebSocket):** with `ENABLE_SCHWAB_LIVE_DATA` and a valid token, set `ENABLE_SCHWAB_STREAMING=true` and `SCHWAB_STREAM_EQUITY_SYMBOLS=SPY,QQQ,/ES` (comma-separated). **Futures** must use Schwab’s slash symbols (e.g. **`/ES`**, **`/MES`**) so they go to `LEVELONE_FUTURES`; plain tickers use `LEVELONE_EQUITIES`. **Indexes and NYSE internals** use Schwab’s **`$`-prefixed** keys on that same equities service—for example **`$SPX`** and **`$TICK`** in `SCHWAB_STREAM_EQUITY_SYMBOLS` or in `PUT /events/stream/symbols` → `equities` (not bare `SPX` / `TICK`). **Options:** set `SCHWAB_STREAM_OPTIONS_SYMBOLS` to a comma list of **compact OSI**, legacy underscore ids, `O:` + compact, or Schwab padded OSI (same accepted forms as `/options/quotes`); those contracts stream on `LEVELONE_OPTIONS` and emit **`option_quote`** + `OptionContractQuote` (`source` `live_schwab_stream`). Equities and futures still emit **`equity_quote`** + `QuoteSnapshot`. Set **`SCHWAB_STREAMING_DEBUG=true`** temporarily to log raw WebSocket JSON from schwab-py (`Send` / `Receive` lines); turn it off afterward. See `docs/phase4_part2_schwab_stream.md`.
 
 **Session resubscribe (same WebSocket):** `PUT /events/stream/symbols` with JSON `{"equities":["SPY"],"futures":["/ES"],"options":["SPY   260601C00756000"]}` (any subset; **at least one** of the three lists non-empty) and `X-API-Key` replaces Schwab `LEVELONE_*` keys without reconnecting. Returns **503** if streaming is not active.
 
